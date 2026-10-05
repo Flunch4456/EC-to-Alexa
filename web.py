@@ -1,13 +1,12 @@
 """Interface web locale pour lancer la connexion Ecole Directe."""
 
-import base64
 import html
 import json
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
-from ecole_directe import EcoleDirecteClient, EcoleDirecteError
+from ecole_directe import EcoleDirecteClient, EcoleDirecteError, redact_response
 
 
 HOST = "127.0.0.1"
@@ -73,28 +72,21 @@ PAGE = """<!doctype html>
 </html>"""
 
 
-def decode_qcm_text(value: str) -> str:
-  try:
-    return base64.b64decode(value).decode("utf-8")
-  except (ValueError, UnicodeDecodeError):
-    return value
-
-
 def render_qcm(challenge_id: str, data: dict[str, object]) -> str:
-  question = html.escape(decode_qcm_text(str(data.get("question", "Question de sécurité"))))
-  propositions = data.get("propositions") or []
-  options = "".join(
-    f'<label><input type="radio" name="choix" value="{html.escape(str(value), quote=True)}" required>'
-    f" {html.escape(decode_qcm_text(str(value)))}</label>"
-    for value in propositions
-  )
-  return (
-    '<section class="qcm"><p class="qcm-title">Vérification de sécurité</p>'
-    f"<p>{question}</p>"
-    f'<form method="post" action="/qcm"><input type="hidden" name="challenge" '
-    f'value="{html.escape(challenge_id, quote=True)}">{options}'
-    '<button type="submit">Valider la réponse</button></form></section>'
-  )
+    question = html.escape(str(data.get("question", "Question de sécurité")))
+    propositions = data.get("propositions") or []
+    options = "".join(
+        f'<label><input type="radio" name="choix" value="{html.escape(str(value), quote=True)}" required>'
+        f" {html.escape(str(value))}</label>"
+        for value in propositions
+    )
+    return (
+        '<section class="qcm"><p class="qcm-title">Vérification de sécurité</p>'
+        f"<p>{question}</p>"
+        f'<form method="post" action="/qcm"><input type="hidden" name="challenge" '
+        f'value="{html.escape(challenge_id, quote=True)}">{options}'
+        '<button type="submit">Valider la réponse</button></form></section>'
+    )
 
 
 def render(result: str = "", error: bool = False, qcm: str = "") -> bytes:
@@ -142,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
             CHALLENGES[challenge_id] = client
             self._send(200, render(qcm=render_qcm(challenge_id, qcm.get("data") or {})))
             return
-        self._send(200, render(json.dumps(result, ensure_ascii=False, indent=2)))
+        self._send(200, render(json.dumps(redact_response(result), ensure_ascii=False, indent=2)))
 
     def _answer_qcm(self, form: dict[str, list[str]]) -> None:
         challenge_id = form.get("challenge", [""])[0]
@@ -152,7 +144,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Défi QCM introuvable")
         result = client.complete_qcm(choice)
         CHALLENGES.pop(challenge_id, None)
-        self._send(200, render(json.dumps(result, ensure_ascii=False, indent=2)))
+        self._send(200, render(json.dumps(redact_response(result), ensure_ascii=False, indent=2)))
 
     def _send(self, status: int, body: bytes) -> None:
         self.send_response(status)

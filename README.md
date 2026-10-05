@@ -1,8 +1,9 @@
 # EC-to-Alexa
 
 Client Python minimal pour se connecter a l'API Ecole Directe et recuperer sa
-reponse JSON. Le client suit le protocole actuel : recuperation du cookie GTK,
-puis connexion sur `v3/login.awp?v=4.75.0` avec l'en-tete `X-Gtk`.
+reponse JSON. Le client suit le protocole BlocksDirecte actuel : recuperation
+du cookie GTK, puis connexion sur `v3/login.awp?v=8.0.0` avec l'en-tete
+`X-Gtk` et un User-Agent mobile.
 Il utilise aussi un UUID d'appareil genere pour la session et active
 `sesouvenirdemoi`, comme le client Papillon.
 

@@ -5,7 +5,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs
 from uuid import UUID
 
-from ecole_directe import EcoleDirecteClient, EcoleDirecteError
+from ecole_directe import EcoleDirecteClient, EcoleDirecteError, redact_response
 
 
 class FakeResponse:
@@ -37,7 +37,8 @@ class EcoleDirecteClientTests(unittest.TestCase):
         self.assertEqual(payload["identifiant"], "eleve")
         self.assertEqual(payload["motdepasse"], "secret")
         self.assertTrue(payload["sesouvenirdemoi"])
-        self.assertFalse(payload["isRelogin"])
+        self.assertFalse(payload["isReLogin"])
+        self.assertEqual(payload["sesouvenirdemoi"], True)
         UUID(payload["uuid"])
         self.assertEqual(request.get_header("X-gtk"), "test-gtk")
 
@@ -48,11 +49,19 @@ class EcoleDirecteClientTests(unittest.TestCase):
         with self.assertRaisesRegex(EcoleDirecteError, "Impossible d'obtenir le cookie GTK"):
             client.login()
 
+    def test_redact_response_masque_les_secrets(self):
+        result = redact_response({"token": "secret", "data": [{"accessToken": "autre-secret"}]})
+
+        self.assertEqual(result, {"token": "[masque]", "data": [{"accessToken": "[masque]"}]})
+
     @patch(
         "ecole_directe.urlopen",
         side_effect=[
             FakeResponse(),
-            FakeResponse({"code": 250, "token": "qcm-token", "data": {"propositions": ["Y2hvaXg="]}}),
+            FakeResponse(
+                {"code": 250, "token": "", "data": {}},
+                {"Set-Cookie": "GTK=test-gtk; Path=/", "2fa-token": "qcm-token"},
+            ),
             FakeResponse({"code": 200, "data": {"question": "UXVlc3Rpb24gPw==", "propositions": ["Y2hvaXg="]}}),
             FakeResponse({"code": 200, "data": {"cn": "cn-value", "cv": "cv-value"}}),
             FakeResponse(),
@@ -64,18 +73,20 @@ class EcoleDirecteClientTests(unittest.TestCase):
         login_result = client.login()
         qcm = client.get_qcm()
 
-        result = client.complete_qcm("Y2hvaXg=")
+        result = client.complete_qcm("choix")
 
         self.assertEqual(login_result["code"], 250)
-        self.assertEqual(qcm["data"]["propositions"], ["Y2hvaXg="])
+        self.assertEqual(qcm["data"]["propositions"], ["choix"])
         self.assertEqual(result["token"], "final-token")
         self.assertEqual(mock_urlopen.call_count, 6)
         answer_request = mock_urlopen.call_args_list[3].args[0]
         answer_payload = json.loads(parse_qs(answer_request.data.decode())["data"][0])
         self.assertEqual(answer_payload, {"choix": "Y2hvaXg="})
+        self.assertEqual(answer_request.get_header("2fa-token"), "qcm-token")
         relogin_request = mock_urlopen.call_args_list[5].args[0]
         relogin_payload = json.loads(parse_qs(relogin_request.data.decode())["data"][0])
-        self.assertEqual(relogin_payload["fa"], [{"cn": "cn-value", "cv": "cv-value"}])
+        self.assertEqual(relogin_payload["cn"], "cn-value")
+        self.assertEqual(relogin_payload["cv"], "cv-value")
 
 
 if __name__ == "__main__":
