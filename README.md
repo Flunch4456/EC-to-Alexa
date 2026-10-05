@@ -3,6 +3,8 @@
 Client Python minimal pour se connecter a l'API Ecole Directe et recuperer sa
 reponse JSON. Le client suit le protocole actuel : recuperation du cookie GTK,
 puis connexion sur `v3/login.awp?v=4.75.0` avec l'en-tete `X-Gtk`.
+Il utilise aussi un UUID d'appareil genere pour la session et active
+`sesouvenirdemoi`, comme le client Papillon.
 
 ## Utilisation
 

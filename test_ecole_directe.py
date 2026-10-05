@@ -3,6 +3,7 @@ import unittest
 from http.client import RemoteDisconnected
 from unittest.mock import patch
 from urllib.parse import parse_qs
+from uuid import UUID
 
 from ecole_directe import EcoleDirecteClient, EcoleDirecteError
 
@@ -35,8 +36,9 @@ class EcoleDirecteClientTests(unittest.TestCase):
         payload = json.loads(parse_qs(request.data.decode())["data"][0])
         self.assertEqual(payload["identifiant"], "eleve")
         self.assertEqual(payload["motdepasse"], "secret")
+        self.assertTrue(payload["sesouvenirdemoi"])
         self.assertFalse(payload["isRelogin"])
-        self.assertEqual(payload["uuid"], "")
+        UUID(payload["uuid"])
         self.assertEqual(request.get_header("X-gtk"), "test-gtk")
 
     @patch("ecole_directe.urlopen", side_effect=RemoteDisconnected("serveur ferme la connexion"))

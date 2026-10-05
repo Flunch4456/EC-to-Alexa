@@ -10,6 +10,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 
 API_URL = "https://api.ecoledirecte.com/v3"
@@ -42,6 +43,7 @@ class EcoleDirecteClient:
         self.mot_de_passe = mot_de_passe
         self.token: str | None = None
         self.gtk: str | None = None
+        self.device_uuid = str(uuid4())
 
     def _get_gtk(self) -> None:
         request = Request(
@@ -109,8 +111,9 @@ class EcoleDirecteClient:
         payload: dict[str, Any] = {
             "identifiant": self.identifiant,
             "motdepasse": self.mot_de_passe,
+            "sesouvenirdemoi": True,
             "isRelogin": False,
-            "uuid": "",
+            "uuid": self.device_uuid,
         }
         if fa:
             payload["fa"] = fa
