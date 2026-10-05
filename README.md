@@ -46,8 +46,9 @@ Pour ouvrir le formulaire de connexion dans le navigateur :
 ```
 
 Ouvrez ensuite http://127.0.0.1:8000. Le formulaire lance la connexion avec
-les identifiants saisis et affiche la reponse recue. Si Ecole Directe renvoie
-le code 250, le formulaire affiche le QCM de securite, puis termine le login
-avec les valeurs `cn` et `cv` retournees par l'API.
+les identifiants saisis. Apres la connexion, choisissez la reponse souhaitee :
+emploi du temps, notes, absences ou messages. Si Ecole Directe renvoie le code
+250, le formulaire affiche d'abord le QCM de securite, puis termine le login
+avec les valeurs `cn` et `cv` retournees par l'API avant d'afficher ces choix.
 Les identifiants restent en memoire pendant la requete et ne sont pas ecrits
 dans un fichier.

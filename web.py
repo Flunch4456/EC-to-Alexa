@@ -3,6 +3,7 @@
 import html
 import json
 import secrets
+from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
@@ -12,6 +13,14 @@ from ecole_directe import EcoleDirecteClient, EcoleDirecteError, redact_response
 HOST = "127.0.0.1"
 PORT = 8000
 CHALLENGES: dict[str, EcoleDirecteClient] = {}
+SESSIONS: dict[str, EcoleDirecteClient] = {}
+SERVICES = {
+    "emploi": ("Emploi du temps", "E/{student_id}/emploidutemps.awp?verbe=get&v=1.8.28"),
+    "cahier": ("Cahier de texte", "Eleves/{student_id}/cahierdetexte.awp?verbe=get"),
+    "notes": ("Notes", "eleves/{student_id}/notes.awp?verbe=get"),
+    "absences": ("Absences", "eleves/{student_id}/viescolaire.awp?verbe=get"),
+    "messages": ("Messages", "eleves/{student_id}/messages.awp?verbe=get"),
+}
 
 
 PAGE = """<!doctype html>
@@ -42,6 +51,10 @@ PAGE = """<!doctype html>
     .qcm-title { margin: 0 0 8px; color: var(--accent-dark); font-weight: 700; }
     .qcm label { display: block; margin: 12px 0; font-weight: 400; letter-spacing: 0; text-transform: none; }
     .qcm input { width: auto; margin-right: 7px; }
+    .services { margin-top: 28px; }
+    .services-title { margin: 0 0 14px; font: 700 12px/1.2 Arial, sans-serif; letter-spacing: .08em; text-transform: uppercase; }
+    .service-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .service-grid button { margin-top: 0; text-transform: none; letter-spacing: 0; }
     .result { margin-top: 28px; padding: 16px; overflow: auto; background: #18251f; color: #d9efdb; font: 13px/1.5 Consolas, monospace; white-space: pre-wrap; }
     .error { background: #fff0eb; color: #8e321c; }
     @media (max-width: 700px) { main { grid-template-columns: 1fr; } .intro { padding: 32px; } .eyebrow { margin-bottom: 24px; } .intro p { margin-top: 18px; } }
@@ -64,7 +77,8 @@ PAGE = """<!doctype html>
         <input id="mot_de_passe" name="mot_de_passe" type="password" autocomplete="current-password" required>
         <button type="submit">Se connecter</button>
       </form>
-      {qcm}
+    {qcm}
+    {services}
       {result}
     </section>
   </main>
@@ -89,11 +103,24 @@ def render_qcm(challenge_id: str, data: dict[str, object]) -> str:
     )
 
 
-def render(result: str = "", error: bool = False, qcm: str = "") -> bytes:
+def render_services(session_id: str) -> str:
+    buttons = "".join(
+        f'<button type="submit" name="service" value="{key}">{html.escape(label)}</button>'
+        for key, (label, _) in SERVICES.items()
+    )
+    return (
+        '<section class="services"><p class="services-title">Que voulez-vous consulter ?</p>'
+        f'<form method="post" action="/service"><input type="hidden" name="session" '
+        f'value="{html.escape(session_id, quote=True)}"><div class="service-grid">{buttons}'
+        '</div></form></section>'
+    )
+
+
+def render(result: str = "", error: bool = False, qcm: str = "", services: str = "") -> bytes:
     result_html = ""
     if result:
         result_html = f'<pre class="result{" error" if error else ""}">{html.escape(result)}</pre>'
-    return PAGE.replace("{qcm}", qcm).replace("{result}", result_html).encode("utf-8")
+    return PAGE.replace("{qcm}", qcm).replace("{services}", services).replace("{result}", result_html).encode("utf-8")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -104,7 +131,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, render())
 
     def do_POST(self) -> None:
-        if self.path not in ("/login", "/qcm"):
+        if self.path not in ("/login", "/qcm", "/service"):
             self.send_error(404)
             return
         length = int(self.headers.get("Content-Length", "0"))
@@ -112,8 +139,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/login":
                 self._login(form)
-            else:
+            elif self.path == "/qcm":
                 self._answer_qcm(form)
+            else:
+                self._service(form)
         except EcoleDirecteError as error:
             self._send(502, render(str(error), error=True))
         except (KeyError, ValueError):
@@ -134,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
             CHALLENGES[challenge_id] = client
             self._send(200, render(qcm=render_qcm(challenge_id, qcm.get("data") or {})))
             return
-        self._send(200, render(json.dumps(redact_response(result), ensure_ascii=False, indent=2)))
+        self._show_services(client)
 
     def _answer_qcm(self, form: dict[str, list[str]]) -> None:
         challenge_id = form.get("challenge", [""])[0]
@@ -144,7 +173,39 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Défi QCM introuvable")
         result = client.complete_qcm(choice)
         CHALLENGES.pop(challenge_id, None)
-        self._send(200, render(json.dumps(redact_response(result), ensure_ascii=False, indent=2)))
+        self._show_services(client)
+
+    def _show_services(self, client: EcoleDirecteClient) -> None:
+        if not client.student_id:
+            raise EcoleDirecteError("Impossible de trouver l'identifiant de l'élève.")
+        session_id = secrets.token_urlsafe(24)
+        SESSIONS[session_id] = client
+        self._send(200, render(services=render_services(session_id)))
+
+    def _service(self, form: dict[str, list[str]]) -> None:
+        session_id = form.get("session", [""])[0]
+        service = form.get("service", [""])[0]
+        client = SESSIONS.get(session_id)
+        if not client or service not in SERVICES:
+            raise ValueError("Session ou service invalide")
+        _, endpoint_template = SERVICES[service]
+        endpoint = endpoint_template.format(student_id=client.student_id)
+        params: dict[str, str] = {}
+        if service in ("emploi", "cahier"):
+            start = date.today() - timedelta(days=date.today().weekday())
+            params = {
+                "dateDebut": start.isoformat(),
+                "dateFin": (start + timedelta(days=6)).isoformat(),
+            }
+        result = client.get(endpoint, **params)
+        response_text = json.dumps(redact_response(result), ensure_ascii=False, indent=2)
+        if service in ("emploi", "cahier") and result.get("data") == []:
+            end = start + timedelta(days=6)
+            response_text = (
+                f"Aucune donnée trouvée entre le {start:%d/%m/%Y} et le {end:%d/%m/%Y}.\n\n"
+                f"Réponse API :\n{response_text}"
+            )
+        self._send(200, render(response_text))
 
     def _send(self, status: int, body: bytes) -> None:
         self.send_response(status)

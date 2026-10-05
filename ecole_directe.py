@@ -55,6 +55,7 @@ class EcoleDirecteClient:
         self.identifiant = identifiant
         self.mot_de_passe = mot_de_passe
         self.token: str | None = None
+        self.student_id: str | None = None
         self.gtk: str | None = None
         self.qcm_token: str | None = None
         self.device_uuid = str(uuid4())
@@ -117,6 +118,8 @@ class EcoleDirecteClient:
         except json.JSONDecodeError as error:
             raise EcoleDirecteError("La reponse d'Ecole Directe n'est pas un JSON valide.") from error
 
+        if result.get("token"):
+            self.token = result["token"]
         if result.get("code") in (250, "250"):
             self.qcm_token = response_headers.get("2fa-token") or response_headers.get("x-token")
 
@@ -146,11 +149,26 @@ class EcoleDirecteClient:
         )
         if result.get("token"):
             self.token = result["token"]
+        self.student_id = self._find_student_id(result)
         if result.get("code") in (250, "250"):
             return result
         if not self.token:
             raise EcoleDirecteError("Connexion acceptee mais aucun jeton n'a ete fourni.")
         return result
+
+    @staticmethod
+    def _find_student_id(result: dict[str, Any]) -> str | None:
+        data = result.get("data")
+        if not isinstance(data, dict):
+            return None
+        accounts = data.get("accounts")
+        if isinstance(accounts, list) and accounts:
+            account = accounts[0]
+            if isinstance(account, dict) and account.get("id") is not None:
+                return str(account["id"])
+        if data.get("id") is not None:
+            return str(data["id"])
+        return None
 
     def answer_qcm(self, choice: str) -> dict[str, Any]:
         if not self.qcm_token:
@@ -192,7 +210,14 @@ class EcoleDirecteClient:
     def get(self, endpoint: str, **params: Any) -> dict[str, Any]:
         if not self.token:
             self.login()
-        return self._request(endpoint, params)
+        try:
+            return self._request(endpoint, params)
+        except EcoleDirecteError as error:
+            if "token invalide" not in str(error).lower():
+                raise
+            self.token = None
+            self.login()
+            return self._request(endpoint, params)
 
 
 def main() -> int:

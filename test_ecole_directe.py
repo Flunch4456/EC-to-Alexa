@@ -54,6 +54,41 @@ class EcoleDirecteClientTests(unittest.TestCase):
 
         self.assertEqual(result, {"token": "[masque]", "data": [{"accessToken": "[masque]"}]})
 
+    def test_login_recupere_identifiant_de_leleve(self):
+        client = EcoleDirecteClient("eleve", "secret")
+
+        student_id = client._find_student_id({"data": {"accounts": [{"id": 12345}]}})
+
+        self.assertEqual(student_id, "12345")
+
+    @patch("ecole_directe.urlopen", return_value=FakeResponse({"code": 200, "token": "new-token", "data": []}))
+    def test_une_requete_met_a_jour_le_token(self, mock_urlopen):
+        client = EcoleDirecteClient("eleve", "secret")
+        client.token = "old-token"
+
+        client.get("eleves/123/absences.awp?verbe=get")
+
+        self.assertEqual(client.token, "new-token")
+
+    @patch(
+        "ecole_directe.urlopen",
+        side_effect=[
+            FakeResponse({"code": 401, "message": "Token invalide !"}),
+            FakeResponse(),
+            FakeResponse({"code": 200, "token": "login-token", "data": {}}),
+            FakeResponse({"code": 200, "token": "refreshed-token", "data": []}),
+        ],
+    )
+    def test_requete_reessaie_apres_token_invalide(self, mock_urlopen):
+        client = EcoleDirecteClient("eleve", "secret")
+        client.token = "expired-token"
+
+        result = client.get("eleves/123/absences.awp?verbe=get")
+
+        self.assertEqual(result["data"], [])
+        self.assertEqual(client.token, "refreshed-token")
+        self.assertEqual(mock_urlopen.call_count, 4)
+
     @patch(
         "ecole_directe.urlopen",
         side_effect=[
