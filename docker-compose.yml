@@ -1,0 +1,28 @@
+services:
+  web:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ec_to_alexa_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  oauth:
+    build: .
+    command: ["python", "oauth_server.py"]
+    ports:
+      - "127.0.0.1:8001:8001"
+    env_file:
+      - .env
+    volumes:
+      - ec_to_alexa_data:/data
+    restart: unless-stopped
+
+volumes:
+  ec_to_alexa_data:

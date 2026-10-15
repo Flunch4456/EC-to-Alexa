@@ -125,6 +125,9 @@ def render(result: str = "", error: bool = False, qcm: str = "", services: str =
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        if self.path == "/healthz":
+            self._send(200, b'{"status":"ok"}', content_type="application/json; charset=utf-8")
+            return
         if self.path != "/":
             self.send_error(404)
             return
@@ -207,10 +210,18 @@ class Handler(BaseHTTPRequestHandler):
             )
         self._send(200, render(response_text))
 
-    def _send(self, status: int, body: bytes) -> None:
+    def _send(
+        self,
+        status: int,
+        body: bytes,
+        content_type: str = "text/html; charset=utf-8",
+    ) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
