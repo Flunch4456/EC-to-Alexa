@@ -11,7 +11,8 @@ from ecole_directe import EcoleDirecteClient, EcoleDirecteError, redact_response
 
 
 
-HOST = "127.0.0.1"
+# Listen on every network interface so other devices can reach the server.
+HOST = "0.0.0.0"
 PORT = 8000
 CHALLENGES: dict[str, EcoleDirecteClient] = {}
 SESSIONS: dict[str, EcoleDirecteClient] = {}
@@ -232,7 +233,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Site disponible sur http://{HOST}:{PORT}")
+    print(f"Site disponible sur http://0.0.0.0:{PORT}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

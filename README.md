@@ -45,7 +45,9 @@ Pour ouvrir le formulaire de connexion dans le navigateur :
 .\.venv\Scripts\python.exe .\web.py
 ```
 
-Ouvrez ensuite http://127.0.0.1:8000. Le formulaire lance la connexion avec
+Ouvrez ensuite http://127.0.0.1:8000. Le serveur écoute aussi sur les autres
+interfaces : depuis un autre appareil, utilisez l'adresse IP de la machine,
+par exemple `http://192.168.1.20:8000`. Le formulaire lance la connexion avec
 les identifiants saisis. Apres la connexion, choisissez la reponse souhaitee :
 emploi du temps, notes, absences ou messages. Si Ecole Directe renvoie le code
 250, le formulaire affiche d'abord le QCM de securite, puis termine le login

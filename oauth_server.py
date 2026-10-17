@@ -158,8 +158,8 @@ def main() -> None:
     oauth = OAuthAccountLinking(store, client_id, redirect_uri)
     OAuthHandler.oauth = oauth
     OAuthHandler.skill = AlexaSkill.from_store(store)
-    server = ThreadingHTTPServer(("127.0.0.1", 8001), OAuthHandler)
-    print("OAuth/Alexa local server disponible sur http://127.0.0.1:8001")
+    server = ThreadingHTTPServer(("0.0.0.0", 8001), OAuthHandler)
+    print("OAuth/Alexa server disponible sur http://0.0.0.0:8001")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

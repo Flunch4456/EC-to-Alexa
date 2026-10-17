@@ -243,8 +243,8 @@ def main() -> None:
         raise SystemExit("Configure ECO_TO_ALEXA_SECRET_KEY avec une clé Fernet.")
     store = AccountStore(os.environ.get("ECO_TO_ALEXA_DB", "ec_to_alexa.sqlite3"), key.encode())
     AccountHandler.store = store
-    server = ThreadingHTTPServer(("127.0.0.1", 8000), AccountHandler)
-    print("Serveur comptes disponible sur http://127.0.0.1:8000")
+    server = ThreadingHTTPServer(("0.0.0.0", 8000), AccountHandler)
+    print("Serveur comptes disponible sur http://0.0.0.0:8000")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
