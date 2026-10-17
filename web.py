@@ -10,6 +10,7 @@ from urllib.parse import parse_qs
 from ecole_directe import EcoleDirecteClient, EcoleDirecteError, redact_response
 
 
+
 HOST = "127.0.0.1"
 PORT = 8000
 CHALLENGES: dict[str, EcoleDirecteClient] = {}

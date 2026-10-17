@@ -138,8 +138,8 @@ docker compose ps
 docker compose logs --tail=100 web oauth
 ```
 
-Les services restent liés à `0.0.0.0:8000` et `0.0.0.0:8001` ; ils sont
-donc exposés directement sur Internet. Le volume Docker
+Les services restent liés à `127.0.0.1:8000` et `127.0.0.1:8001` ; ils ne sont
+donc pas exposés directement sur Internet. Le volume Docker
 `ec_to_alexa_data` conserve la base SQLite lors des mises à jour.
 
 ### 4. Installer Caddy et activer HTTPS
