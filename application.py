@@ -17,6 +17,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -169,6 +170,18 @@ class AccountStore:
                 linked_at INTEGER NOT NULL,
                 last_seen_at INTEGER
             );
+            -- Réponses au QCM de sécurité d'École Directe déjà validées, pour y
+            -- répondre automatiquement ensuite. Rien n'est stocké en clair :
+            -- question et réponse sont des HMAC-SHA256 dont la clé dérive de
+            -- ECO_TO_ALEXA_SECRET_KEY (absente de la base).
+            CREATE TABLE IF NOT EXISTS qcm_answers (
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                question_hash TEXT NOT NULL,
+                answer_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_used_at INTEGER,
+                PRIMARY KEY (user_id, question_hash)
+            );
             """
         )
         try:
@@ -177,8 +190,20 @@ class AccountStore:
             )
         except sqlite3.OperationalError:
             pass
+        try:
+            # Date à laquelle Alexa a rencontré une question de sécurité sans
+            # réponse connue : le site invite alors l'élève à y répondre.
+            self.db.execute(
+                "ALTER TABLE ecole_directe_connections ADD COLUMN qcm_required_at INTEGER"
+            )
+        except sqlite3.OperationalError:
+            pass
         self.db.commit()
         self._fernet = Fernet(secret_key) if secret_key else None
+        self._qcm_key = (
+            hmac.new(secret_key, b"ec-to-alexa/qcm-answers/v1", hashlib.sha256).digest()
+            if secret_key else None
+        )
 
     @staticmethod
     def _password_hash(password: str, salt: bytes | None = None) -> str:
@@ -364,11 +389,137 @@ class AccountStore:
             ON CONFLICT(user_id) DO UPDATE SET
                 encrypted_credentials=excluded.encrypted_credentials,
                 student_id=excluded.student_id,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                qcm_required_at=NULL
             """,
             (user_id, encrypted, student_id, time.time_ns() // 1000),
         )
         self.db.commit()
+
+    def _encrypt_credentials(self, client: EcoleDirecteClient) -> bytes:
+        assert self._fernet is not None
+        return self._fernet.encrypt(json.dumps({
+            "identifiant": client.identifiant,
+            "mot_de_passe": client.mot_de_passe,
+            "device_uuid": client.device_uuid,
+            "cn": client.cn,
+            "cv": client.cv,
+        }).encode("utf-8"))
+
+    def refresh_ecole_directe_session(self, user_id: int, client: EcoleDirecteClient) -> None:
+        """Enregistre les nouvelles valeurs cn/cv après un QCM résolu automatiquement.
+
+        La date de vérification (qui sert aussi de version au cache) ne change
+        pas : le client en mémoire est déjà à jour.
+        """
+        if self._fernet is None:
+            return
+        with self._lock:
+            self.db.execute(
+                "UPDATE ecole_directe_connections SET encrypted_credentials = ?, "
+                "qcm_required_at = NULL WHERE user_id = ?",
+                (self._encrypt_credentials(client), user_id),
+            )
+            self.db.commit()
+
+    # -- QCM de sécurité École Directe -------------------------------------
+    @staticmethod
+    def _qcm_normalize(value: str) -> str:
+        return " ".join(unicodedata.normalize("NFKC", str(value)).casefold().split())
+
+    def _qcm_digest(self, *parts: str) -> str:
+        assert self._qcm_key is not None
+        message = "\x00".join(self._qcm_normalize(part) for part in parts)
+        return hmac.new(self._qcm_key, message.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def remember_qcm_answer(self, user_id: int, identifiant: str, question: str, answer: str) -> None:
+        """Mémorise (hachée) une réponse acceptée par École Directe."""
+        if self._qcm_key is None or not question or not answer:
+            return
+        uid = str(user_id)
+        question_hash = self._qcm_digest("q", uid, identifiant, question)
+        answer_hash = self._qcm_digest("a", uid, identifiant, question, answer)
+        now = int(time.time())
+        with self._lock:
+            self.db.execute(
+                """
+                INSERT INTO qcm_answers(user_id, question_hash, answer_hash, created_at, last_used_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, question_hash) DO UPDATE SET
+                    answer_hash=excluded.answer_hash, last_used_at=excluded.last_used_at
+                """,
+                (user_id, question_hash, answer_hash, now, now),
+            )
+            self.db.commit()
+
+    def known_qcm_answer(
+        self, user_id: int, identifiant: str, question: str, propositions: list[str]
+    ) -> str | None:
+        """Retrouve parmi les propositions celle dont le hachage a été mémorisé."""
+        if self._qcm_key is None or not question:
+            return None
+        uid = str(user_id)
+        row = self.db.execute(
+            "SELECT answer_hash FROM qcm_answers WHERE user_id = ? AND question_hash = ?",
+            (user_id, self._qcm_digest("q", uid, identifiant, question)),
+        ).fetchone()
+        if not row:
+            return None
+        matches = [
+            value for value in propositions
+            if hmac.compare_digest(
+                self._qcm_digest("a", uid, identifiant, question, value), row["answer_hash"]
+            )
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def forget_qcm_answer(self, user_id: int, identifiant: str, question: str) -> None:
+        if self._qcm_key is None:
+            return
+        with self._lock:
+            self.db.execute(
+                "DELETE FROM qcm_answers WHERE user_id = ? AND question_hash = ?",
+                (user_id, self._qcm_digest("q", str(user_id), identifiant, question)),
+            )
+            self.db.commit()
+
+    def forget_all_qcm_answers(self, user_id: int) -> None:
+        with self._lock:
+            self.db.execute("DELETE FROM qcm_answers WHERE user_id = ?", (user_id,))
+            self.db.commit()
+
+    def qcm_answer_count(self, user_id: int) -> int:
+        row = self.db.execute(
+            "SELECT COUNT(*) FROM qcm_answers WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return int(row[0])
+
+    def mark_qcm_required(self, user_id: int) -> None:
+        with self._lock:
+            self.db.execute(
+                "UPDATE ecole_directe_connections SET qcm_required_at = ? WHERE user_id = ?",
+                (int(time.time()), user_id),
+            )
+            self.db.commit()
+
+    def attach_qcm_memory(self, user_id: int, client: EcoleDirecteClient) -> EcoleDirecteClient:
+        """Branche la mémoire des réponses QCM de cet utilisateur sur le client."""
+        identifiant = client.identifiant
+
+        def resolve(question: str, propositions: list[str]) -> str | None:
+            return self.known_qcm_answer(user_id, identifiant, question, propositions)
+
+        def answered(question: str, choice: str) -> None:
+            self.remember_qcm_answer(user_id, identifiant, question, choice)
+            self.refresh_ecole_directe_session(user_id, client)
+            self.audit(user_id, "qcm_auto_answered")
+
+        def rejected(question: str, choice: str) -> None:
+            self.forget_qcm_answer(user_id, identifiant, question)
+            self.audit(user_id, "qcm_auto_answer_rejected")
+
+        client.qcm_resolver, client.on_qcm_answered, client.on_qcm_rejected = resolve, answered, rejected
+        return client
 
     def ecole_directe_client(
         self, user_id: int, timeout: float = 20
@@ -399,7 +550,7 @@ class AccountStore:
             timeout=timeout,
         )
         client.student_id = row["student_id"]
-        return client
+        return self.attach_qcm_memory(user_id, client)
 
     def ecole_directe_version(self, user_id: int) -> int | None:
         """Horodatage de la liaison : change à chaque reconnexion ou suppression."""
@@ -466,7 +617,7 @@ class AccountStore:
 
     def ecole_directe_info(self, user_id: int) -> dict[str, str | None] | None:
         row = self.db.execute(
-            "SELECT student_id, updated_at FROM ecole_directe_connections WHERE user_id = ?",
+            "SELECT student_id, updated_at, qcm_required_at FROM ecole_directe_connections WHERE user_id = ?",
             (user_id,),
         ).fetchone()
         if not row:
@@ -474,7 +625,12 @@ class AccountStore:
         stamp = int(row["updated_at"])
         if stamp > 10**11:  # microsecondes depuis la version qui sert de jeton de cache
             stamp //= 1_000_000
-        return {"student_id": row["student_id"], "updated_at": str(stamp)}
+        required = row["qcm_required_at"]
+        return {
+            "student_id": row["student_id"],
+            "updated_at": str(stamp),
+            "qcm_required_at": str(required) if required else None,
+        }
 
     def delete_ecole_directe_connection(self, user_id: int) -> None:
         with self._lock:
@@ -540,6 +696,7 @@ class AccountStore:
             "ecole_directe_connected": self.has_ecole_directe_connection(user_id),
             "ecole_directe": self.ecole_directe_info(user_id),
             "amazon": self.amazon_link(user_id),
+            "qcm_answers_saved": self.qcm_answer_count(user_id),
         }
 
     def audit(self, user_id: int, event: str) -> None:
@@ -716,10 +873,13 @@ class AlexaSkill:
         try:
             text = self._answer(service, name, intent.get("slots") or {})
         except EcoleDirecteQcmRequired:
+            # Question inconnue (ou réponse mémorisée refusée) : l'élève y
+            # répond une fois sur le site, la réponse est ensuite mémorisée.
+            self.store.mark_qcm_required(user_id)
             text = (
-                "École Directe demande de répondre à une question de sécurité. "
-                "Ouvre le site EC to Alexa, reconnecte ton compte École Directe "
-                "et réponds à la question, puis redemande-moi."
+                "École Directe pose une question de sécurité que je ne connais pas encore. "
+                "Ouvre le site EC to Alexa et réponds-y, je m'en souviendrai pour "
+                "les prochaines fois. Ensuite, redemande-moi."
             )
         except EcoleDirecteError:
             text = (

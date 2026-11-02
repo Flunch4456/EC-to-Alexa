@@ -26,7 +26,7 @@ from application import (
     trusted_client_address,
 )
 from amazon_link import AmazonLinkError, AmazonSkillLinker, pkce_pair
-from ecole_directe import EcoleDirecteClient, EcoleDirecteError
+from ecole_directe import EcoleDirecteClient, EcoleDirecteError, EcoleDirecteQcmRequired
 import ui
 
 RATE_LIMITER = SharedRateLimiter()
@@ -36,6 +36,8 @@ FLASH = {
     "welcome": "Compte créé. Il reste à connecter École Directe.",
     "login": "Connexion réussie.",
     "ed": "École Directe est connecté. Ton identifiant élève a été vérifié.",
+    "ed-auto": "École Directe est reconnecté : la question de sécurité a été reconnue et remplie automatiquement.",
+    "qcm-off": "Les réponses de sécurité mémorisées ont été oubliées.",
     "ed-off": "École Directe est déconnecté et Alexa n'a plus accès à tes données.",
     "alexa-off": "La liaison Alexa est révoquée. Alexa te demandera de lier ton compte à nouveau.",
     "amazon": "Ton compte Amazon est lié : la skill Mon Carnet Scolaire est activée sur tes appareils Alexa.",
@@ -182,6 +184,8 @@ class AccountHandler(BaseHTTPRequestHandler):
         actions = {
             "/connect-ecole-directe": self._connect,
             "/qcm": self._qcm,
+            "/ecole-directe/verify": self._verify,
+            "/ecole-directe/forget-qcm": self._forget_qcm,
             "/disconnect-ecole-directe": self._disconnect,
             "/alexa/unlink": self._unlink_alexa,
             "/simulate": self._simulate,
@@ -250,22 +254,44 @@ class AccountHandler(BaseHTTPRequestHandler):
         password = fields.get("ecole_password", "")
         if not identifiant or not password:
             raise ValueError("Saisis ton identifiant et ton mot de passe École Directe.")
-        client = EcoleDirecteClient(identifiant, password)
+        client = self.store.attach_qcm_memory(user_id, EcoleDirecteClient(identifiant, password))
+        self._login_or_ask(user_id, session, client, automatic="ed-auto")
+
+    def _verify(self, user_id: int, session: str, fields: dict[str, str]) -> None:
+        """Reconnexion avec les identifiants enregistrés, quand Alexa a rencontré une question."""
+        client = self.store.ecole_directe_client(user_id)
+        if client is None:
+            raise ValueError("Connecte d'abord École Directe.")
+        self._login_or_ask(user_id, session, client)
+
+    def _login_or_ask(
+        self, user_id: int, session: str, client: EcoleDirecteClient, automatic: str = "ed-auto"
+    ) -> None:
+        """Connecte le client ; répond seul au QCM si la réponse est mémorisée, sinon le pose."""
         try:
-            result = client.login()
-            if result.get("code") in (250, "250"):
-                question = client.get_qcm().get("data") or {}
-                self.pending.put(session, client, question)
-                self._send(200, "text/html", self._dashboard(user_id))
-                return
+            client.ensure_login()
+        except EcoleDirecteQcmRequired as required:
+            try:
+                question = required.question if client.qcm_token else None
+                if not question:
+                    # Réponse mémorisée refusée (jeton QCM consommé) : nouvelle question.
+                    client.login()
+                    question = client.get_qcm().get("data") or {}
+            except EcoleDirecteError as error:
+                raise ValueError(f"École Directe a refusé la connexion : {error}") from error
+            if required.known:
+                self.store.audit(user_id, "qcm_answer_forgotten")
+            self.pending.put(session, client, question)
+            self._send(200, "text/html", self._dashboard(user_id))
+            return
         except EcoleDirecteError as error:
             raise ValueError(f"École Directe a refusé la connexion : {error}") from error
-        self._save_connection(user_id, client)
+        self._save_connection(user_id, client, flash=automatic if client.qcm_auto_answered else "ed")
 
     def _qcm(self, user_id: int, session: str, fields: dict[str, str]) -> None:
         pending = self.pending.get(session)
         if pending is None:
-            raise ValueError("La question de sécurité a expiré. Reconnecte École Directe.")
+            raise ValueError("La question de sécurité a expiré. Recommence la connexion École Directe.")
         client, question = pending
         choice = fields.get("choix", "")
         if choice not in [str(value) for value in question.get("propositions") or []]:
@@ -276,9 +302,18 @@ class AccountHandler(BaseHTTPRequestHandler):
             self.pending.pop(session)
             raise ValueError(f"Réponse refusée par École Directe : {error}") from error
         self.pending.pop(session)
+        # Réponse acceptée : mémorisée (hachée) pour y répondre seul la prochaine fois.
+        self.store.remember_qcm_answer(
+            user_id, client.identifiant, str(question.get("question") or ""), choice
+        )
         self._save_connection(user_id, client)
 
-    def _save_connection(self, user_id: int, client: EcoleDirecteClient) -> None:
+    def _forget_qcm(self, user_id: int, session: str, fields: dict[str, str]) -> None:
+        self.store.forget_all_qcm_answers(user_id)
+        self.store.audit(user_id, "qcm_answers_forgotten")
+        self._redirect("/dashboard?ok=qcm-off")
+
+    def _save_connection(self, user_id: int, client: EcoleDirecteClient, flash: str = "ed") -> None:
         if not client.token or not client.student_id:
             raise ValueError("École Directe n'a pas renvoyé d'identifiant élève vérifiable.")
         self.store.save_ecole_directe_connection(
@@ -291,7 +326,7 @@ class AccountHandler(BaseHTTPRequestHandler):
             cv=client.cv,
         )
         self.store.audit(user_id, "ecole_directe_connected")
-        self._redirect("/dashboard?ok=ed")
+        self._redirect(f"/dashboard?ok={flash}")
 
     def _disconnect(self, user_id: int, session: str, fields: dict[str, str]) -> None:
         self.pending.pop(session)
@@ -431,16 +466,17 @@ class AccountHandler(BaseHTTPRequestHandler):
   <p>Connecté en tant que <strong>{ui.esc(account['email'])}</strong>.</p></li>"""
 
         # Étape 2 : École Directe
-        if info:
-            since = datetime.fromtimestamp(int(info["updated_at"] or 0)).strftime("%d/%m/%Y à %H:%M")
-            step_ed = f"""
-<li class="done"><h2>École Directe <span class="status">connecté</span></h2>
-  <dl class="facts"><dt>Identifiant élève</dt><dd>{ui.esc(info['student_id'])}</dd>
-  <dt>Vérifié le</dt><dd>{since}</dd></dl>
-  <p>Ton mot de passe est chiffré sur le serveur et n'est jamais affiché.</p>
-  <form method="post" action="/disconnect-ecole-directe">{hidden}
-    <button class="danger" type="submit">Déconnecter École Directe</button></form></li>"""
-        elif pending:
+        remembered = self.store.qcm_answer_count(user_id)
+        memory_note = (
+            f"""
+  <p class="aside">Réponses de sécurité mémorisées : <strong>{remembered}</strong>. Elles sont
+  hachées (illisibles, même pour le serveur) et servent seulement à reconnaître la bonne
+  proposition quand École Directe repose la même question.</p>
+  <form method="post" action="/ecole-directe/forget-qcm">{hidden}
+    <button class="quiet" type="submit">Oublier ces réponses</button></form>"""
+            if remembered else ""
+        )
+        if pending:
             question = pending[1]
             options = "".join(
                 f'<label class="choice"><input type="radio" name="choix" value="{ui.esc(value)}" required> {ui.esc(value)}</label>'
@@ -449,11 +485,29 @@ class AccountHandler(BaseHTTPRequestHandler):
             step_ed = f"""
 <li><h2>École Directe <span class="status">question de sécurité</span></h2>
   <p>École Directe veut vérifier que c'est bien toi. Réponds à sa question pour terminer
-  la connexion. Une bonne réponse évite qu'elle soit reposée à chaque demande à Alexa.</p>
+  la connexion. Ta réponse est mémorisée sous forme hachée : quand École Directe reposera
+  cette question, Alexa y répondra toute seule.</p>
   <form method="post" action="/qcm" class="stack">{hidden}
     <fieldset><legend>{ui.esc(question.get('question') or 'Question de sécurité')}</legend>{options}</fieldset>
     <button type="submit">Valider ma réponse</button>
   </form></li>"""
+        elif info and info.get("qcm_required_at"):
+            asked = datetime.fromtimestamp(int(info["qcm_required_at"])).strftime("%d/%m/%Y à %H:%M")
+            step_ed = f"""
+<li><h2>École Directe <span class="status">question à répondre</span></h2>
+  <p>Le {asked}, École Directe a posé à Alexa une question de sécurité qu'elle ne connaissait
+  pas encore. Réponds-y une fois ici : Alexa s'en souviendra pour les prochaines fois.</p>
+  <form method="post" action="/ecole-directe/verify">{hidden}
+    <button type="submit">Répondre à la question de sécurité</button></form>{memory_note}</li>"""
+        elif info:
+            since = datetime.fromtimestamp(int(info["updated_at"] or 0)).strftime("%d/%m/%Y à %H:%M")
+            step_ed = f"""
+<li class="done"><h2>École Directe <span class="status">connecté</span></h2>
+  <dl class="facts"><dt>Identifiant élève</dt><dd>{ui.esc(info['student_id'])}</dd>
+  <dt>Vérifié le</dt><dd>{since}</dd></dl>
+  <p>Ton mot de passe est chiffré sur le serveur et n'est jamais affiché.</p>{memory_note}
+  <form method="post" action="/disconnect-ecole-directe">{hidden}
+    <button class="danger" type="submit">Déconnecter École Directe</button></form></li>"""
         else:
             step_ed = f"""
 <li><h2>École Directe <span class="status">à connecter</span></h2>

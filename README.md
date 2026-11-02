@@ -51,8 +51,11 @@ Chaque élève utilise le site du serveur (par exemple
    service) ;
 2. **connecter École Directe** : identifiants vérifiés auprès d'École
    Directe, puis chiffrés sur le serveur. Si École Directe pose sa question
-   de sécurité (QCM), elle s'affiche sur la page et la réponse est mémorisée
-   pour ne pas revenir à chaque demande ;
+   de sécurité (QCM), elle s'affiche sur la page. La réponse acceptée est
+   mémorisée **sous forme hachée** : quand École Directe repose une question
+   déjà connue, le serveur y répond tout seul, à la voix comme sur le site.
+   Si la question est nouvelle, Alexa demande d'aller y répondre une fois sur
+   le site (bouton « Répondre à la question de sécurité ») ;
 3. **lier son compte Amazon** avec le bouton « Lier mon compte Amazon » :
    connexion sur la page officielle d'Amazon, puis la skill est activée et
    liée automatiquement. Le tableau de bord affiche ensuite le compte Alexa
@@ -114,13 +117,20 @@ du compte, la révocation d'Alexa et la suppression du compte.
   obligatoire, PKCE pour la liaison depuis le site, `state` lié à la session.
 - **Site** : aucun JavaScript, CSP stricte, jeton CSRF sur chaque formulaire,
   cookies `HttpOnly`/`Secure`/`SameSite=Lax`, limitation de débit.
+- **Réponses au QCM** : jamais en clair. Question et réponse sont stockées
+  en HMAC-SHA256, avec une clé dérivée de `ECO_TO_ALEXA_SECRET_KEY` (absente
+  de la base) et liées au compte et à l'identifiant École Directe. Le serveur
+  ne fait que reconnaître, parmi les propositions d'École Directe, celle qui a
+  déjà été acceptée. Une réponse refusée est oubliée, et l'élève peut tout
+  effacer depuis le site (« Oublier ces réponses »).
 - **Isolation** : chaque compte ne voit que ses données. Un compte Alexa
   n'est lié qu'à un seul compte EC-to-Alexa.
 - **Réseau** : seuls les ports 80 et 443 du proxy sont exposés à Internet.
   Le trajet proxy → serveur peut rester chiffré (routeur HTTPS interne).
 
 EC-to-Alexa n'est affilié ni à École Directe ni à Amazon. Il ne contourne
-aucune protection : le QCM d'École Directe est toujours résolu par l'élève.
+aucune protection : chaque réponse au QCM d'École Directe est d'abord donnée
+par l'élève, le serveur ne fait que la rejouer quand la même question revient.
 
 ## Développement
 

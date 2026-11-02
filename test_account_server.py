@@ -17,28 +17,49 @@ from cryptography.fernet import Fernet
 
 import account_server
 from application import AccountStore, AlexaSkill
+from ecole_directe import EcoleDirecteClient, EcoleDirecteError
 
 
-class FakeClient:
-    """Imite EcoleDirecteClient : QCM au premier login, succès après la bonne réponse."""
+class FakeClient(EcoleDirecteClient):
+    """Imite École Directe : QCM tant que cn/cv ne sont pas valides, succès après la bonne réponse.
 
-    def __init__(self, identifiant, mot_de_passe, **_):
-        self.identifiant, self.mot_de_passe = identifiant, mot_de_passe
-        self.token = self.student_id = self.cn = self.cv = None
+    Les valeurs cn/cv valides et la question posée sont réglables pour simuler
+    une session expirée ou une nouvelle question.
+    """
+
+    QUESTIONS = {"Mois de naissance ?": (["Mars", "Mai"], "Mars"),
+                 "Année de naissance ?": (["2009", "2010"], "2010")}
+    question = "Mois de naissance ?"
+    valid_cn = "cn-1"
+    logins = 0
+    answers = []
+
+    def __init__(self, identifiant, mot_de_passe, **kwargs):
+        super().__init__(identifiant, mot_de_passe, **kwargs)
         self.device_uuid = "uuid-fixe"
 
     def login(self, cn=None, cv=None):
-        if cn:
+        type(self).logins += 1
+        if cn and cn == type(self).valid_cn:
             self.token, self.student_id = "jeton", "4321"
             return {"code": 200}
+        self.token, self.qcm_token = None, "qcm"
         return {"code": 250}
 
     def get_qcm(self):
-        return {"data": {"question": "Mois de naissance ?", "propositions": ["Mars", "Mai"]}}
+        propositions, _ = self.QUESTIONS[type(self).question]
+        return {"data": {"question": type(self).question, "propositions": propositions}}
 
     def complete_qcm(self, choice):
-        self.cn, self.cv = "cn", "cv"
-        return self.login("cn", "cv")
+        type(self).answers.append(choice)
+        self.qcm_token = None
+        if choice != self.QUESTIONS[type(self).question][1]:
+            raise EcoleDirecteError("Réponse incorrecte")
+        self.cn, self.cv = type(self).valid_cn, "cv"
+        return self.login(self.cn, self.cv)
+
+    def _request(self, endpoint, payload, accepted_codes=(200,)):
+        return {"code": 200, "data": []}
 
 
 class FakeService:
@@ -54,6 +75,10 @@ class AccountSiteTests(unittest.TestCase):
         self.env.start()
         self.client_patch = patch.object(account_server, "EcoleDirecteClient", FakeClient)
         self.client_patch.start()
+        self.store_client_patch = patch("application.EcoleDirecteClient", FakeClient)
+        self.store_client_patch.start()
+        FakeClient.question, FakeClient.valid_cn, FakeClient.logins, FakeClient.answers = (
+            "Mois de naissance ?", "cn-1", 0, [])
         self.tmp = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False)
         self.store = AccountStore(self.tmp.name, Fernet.generate_key())
         skill = AlexaSkill(self.store)
@@ -75,6 +100,7 @@ class AccountSiteTests(unittest.TestCase):
         self.server.server_close()
         self.store.close()
         self.client_patch.stop()
+        self.store_client_patch.stop()
         self.env.stop()
 
     def get(self, path):
@@ -109,7 +135,7 @@ class AccountSiteTests(unittest.TestCase):
         self.assertIn("4321", page)
         user_id = self.store.user_for_login("eleve@example.test", "motdepasse-solide")
         client = self.store.ecole_directe_client(user_id)
-        self.assertEqual((client.device_uuid, client.cn, client.cv), ("uuid-fixe", "cn", "cv"))
+        self.assertEqual((client.device_uuid, client.cn, client.cv), ("uuid-fixe", "cn-1", "cv"))
         status, page = self.post("/simulate", csrf=self.csrf(page), question="today")
         self.assertIn("Mathématiques en salle A3", page)
 
@@ -154,10 +180,6 @@ class AccountSiteTests(unittest.TestCase):
         self.assertIn("style-src 'self'", csp)
         status, css = self.get("/static/app.css")
         self.assertIn("--margin", css)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class FakeAmazon:
@@ -270,3 +292,97 @@ class WebOnlyLinkingTests(AmazonLinkFlowTests):
         self.assertEqual(card["type"], "Simple")
         self.assertIn("https://ec-to-alexa.example", card["content"])
         self.assertIn("site EC to Alexa", response["response"]["outputSpeech"]["ssml"])
+
+
+class QcmMemoryTests(AccountSiteTests):
+    """Réponses au QCM mémorisées (hachées) et réutilisées par Alexa et par le site."""
+
+    TODAY = {"request": {"type": "IntentRequest", "intent": {"name": "GetTodayScheduleIntent"}}}
+
+    def setUp(self):
+        super().setUp()
+        self.skill = AlexaSkill(self.store)  # vrai chargement depuis la base
+
+    def connect(self):
+        _, page = self.register()
+        _, page = self.post("/connect-ecole-directe", csrf=self.csrf(page),
+                            identifiant="eleve", ecole_password="secret")
+        _, page = self.post("/qcm", csrf=self.csrf(page), choix="Mars")
+        self.assertIn("École Directe est connecté", page)
+        return self.store.user_for_login("eleve@example.test", "motdepasse-solide")
+
+    def speak(self, user_id):
+        response = AlexaSkill(self.store).handle_for_user(user_id, self.TODAY)
+        return response["response"]["outputSpeech"]["ssml"]
+
+    def test_answers_are_stored_as_keyed_hashes_only(self):
+        user_id = self.connect()
+        self.assertEqual(self.store.qcm_answer_count(user_id), 1)
+        with open(self.tmp.name, "rb") as file:
+            raw = file.read()
+        for clear in (b"Mars", b"Mois de naissance", "Mois de naissance".encode("utf-16-le")):
+            self.assertNotIn(clear, raw)
+        row = self.store.db.execute("SELECT question_hash, answer_hash FROM qcm_answers").fetchone()
+        self.assertRegex(row["question_hash"], r"^[0-9a-f]{64}$")
+        self.assertRegex(row["answer_hash"], r"^[0-9a-f]{64}$")
+        # Autre clé serveur : la réponse n'est plus reconnue.
+        other = AccountStore(self.tmp.name, Fernet.generate_key())
+        self.assertIsNone(other.known_qcm_answer(user_id, "eleve", "Mois de naissance ?", ["Mars", "Mai"]))
+        other.close()
+        # Autre compte École Directe : non reconnue non plus.
+        self.assertIsNone(self.store.known_qcm_answer(user_id, "autre", "Mois de naissance ?", ["Mars", "Mai"]))
+        self.assertEqual(
+            self.store.known_qcm_answer(user_id, "eleve", "  mois DE naissance ? ", ["Mai", "Mars"]), "Mars")
+
+    def test_alexa_answers_a_known_question_by_itself(self):
+        user_id = self.connect()
+        FakeClient.valid_cn = "cn-2"  # session École Directe expirée : QCM reposé
+        FakeClient.answers = []
+        speech = self.speak(user_id)
+        self.assertNotIn("question de sécurité", speech)
+        self.assertEqual(FakeClient.answers, ["Mars"])
+        self.assertEqual(self.store.ecole_directe_client(user_id).cn, "cn-2")
+        self.assertIsNone(self.store.ecole_directe_info(user_id)["qcm_required_at"])
+
+    def test_unknown_question_sends_the_student_to_the_website(self):
+        user_id = self.connect()
+        FakeClient.valid_cn, FakeClient.question = "cn-2", "Année de naissance ?"
+        FakeClient.answers = []
+        speech = self.speak(user_id)
+        self.assertIn("site EC to Alexa", speech)
+        self.assertEqual(FakeClient.answers, [])  # aucune réponse devinée
+        self.assertIsNotNone(self.store.ecole_directe_info(user_id)["qcm_required_at"])
+        _, page = self.get("/dashboard")
+        self.assertIn("Répondre à la question de sécurité", page)
+        _, page = self.post("/ecole-directe/verify", csrf=self.csrf(page))
+        self.assertIn("Année de naissance ?", page)
+        _, page = self.post("/qcm", csrf=self.csrf(page), choix="2010")
+        self.assertIn("École Directe est connecté", page)
+        self.assertEqual(self.store.qcm_answer_count(user_id), 2)
+        self.assertIsNone(self.store.ecole_directe_info(user_id)["qcm_required_at"])
+        # La fois suivante, Alexa répond seule à cette question aussi.
+        FakeClient.valid_cn = "cn-3"
+        self.assertNotIn("question de sécurité", self.speak(user_id))
+
+    def test_rejected_answer_is_forgotten_and_asked_again(self):
+        user_id = self.connect()
+        original = FakeClient.QUESTIONS
+        FakeClient.QUESTIONS = dict(original, **{"Mois de naissance ?": (["Mars", "Mai"], "Mai")})
+        try:
+            FakeClient.valid_cn = "cn-2"
+            self.assertIn("site EC to Alexa", self.speak(user_id))
+            self.assertEqual(self.store.qcm_answer_count(user_id), 0)
+        finally:
+            FakeClient.QUESTIONS = original
+
+    def test_reconnecting_reuses_the_answer_and_it_can_be_forgotten(self):
+        user_id = self.connect()
+        _, page = self.get("/dashboard")
+        self.assertIn("Réponses de sécurité mémorisées", page)
+        _, page = self.post("/disconnect-ecole-directe", csrf=self.csrf(page))
+        _, page = self.post("/connect-ecole-directe", csrf=self.csrf(page),
+                            identifiant="eleve", ecole_password="secret")
+        self.assertIn("remplie automatiquement", page)
+        _, page = self.post("/ecole-directe/forget-qcm", csrf=self.csrf(page))
+        self.assertIn("oubliées", page)
+        self.assertEqual(self.store.qcm_answer_count(user_id), 0)
