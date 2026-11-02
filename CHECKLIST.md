@@ -19,9 +19,8 @@ déploiement.
 - [x] Adaptateur Alexa pour devoirs, absences, messages, aide et arrêt.
 - [x] Serveur HTTP local des routes OAuth et du webhook Alexa.
 - [x] Endpoint `/healthz`, en-têtes `nosniff`/CSP et healthcheck Docker.
-- [x] Dockerfile, Compose, variables d'environnement et guides
-  [`configuration.md`](./configuration.md) et
-  [`installation.md`](./installation.md).
+- [x] Dockerfile, Compose, variables d'environnement et guides (branches
+  `installation-serveur` et `configuration-alexa-skill`).
 
 ## Prochaine exécution autonome
 
@@ -61,15 +60,21 @@ déploiement.
   (Zoraxy retire le préfixe des répertoires virtuels), ports réglables.
 - [x] Skill « Mon Carnet Scolaire » créée dans la console Amazon (fr-FR,
   Custom, Provision your own) et modèle vocal importé.
-- [ ] Console Amazon : endpoint HTTPS et Account Linking, une fois le domaine
-  public en place (valeurs affichées par `install.sh`).
+- [x] Console Amazon : endpoint HTTPS et Account Linking configurés sur le
+  domaine public.
+- [x] Liaison du compte Amazon depuis le site (« Lier mon compte Amazon ») et
+  affichage du compte Alexa associé à chaque École Directe.
+- [x] Routeur HTTPS interne (8443) : trajet proxy → serveur chiffré.
+- [x] Journal des requêtes Alexa refusées (raison, sans donnée sensible).
+- [x] Sauvegarde automatique de la base à chaque `update.sh`.
 - [x] Brancher le healthcheck sur le processus web principal.
 - [x] Ajouter une configuration reverse proxy avec en-têtes de sécurité,
   HTTPS et limites de taille.
 - [x] Ajouter une configuration Caddy séparant les routes comptes et OAuth.
 - [x] Ajouter export/suppression de compte et journal d'audit non sensible.
 - [ ] Ajouter expiration des données scolaires et purge automatique du cache.
-- [ ] Tester la skill dans la console Alexa avec un domaine HTTPS réel.
+- [x] Tester la skill dans la console Alexa avec un domaine HTTPS réel
+  (simulateur : accueil et emploi du temps avec un vrai compte École Directe).
 - [ ] Effectuer un audit de sécurité et une validation manuelle EcoleDirecte
   avant toute exposition publique.
 

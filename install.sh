@@ -144,7 +144,7 @@ fi
 DOMAIN_IP="$(getent ahostsv4 "$DOMAIN_VALUE" 2>/dev/null | awk 'NR==1 {print $1}' || true)"
 PUBLIC_IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
 if [ -z "$DOMAIN_IP" ]; then
-	warn "$DOMAIN_VALUE ne pointe vers aucune adresse : créez l'enregistrement DNS A (voir README)."
+	warn "$DOMAIN_VALUE ne pointe vers aucune adresse : créez l'enregistrement DNS A (guide : branche installation-serveur)."
 elif [ -n "$PUBLIC_IP" ] && [ "$DOMAIN_IP" != "$PUBLIC_IP" ]; then
 	warn "$DOMAIN_VALUE pointe vers $DOMAIN_IP mais l'IP publique de ce serveur est $PUBLIC_IP."
 fi
@@ -235,7 +235,7 @@ Compte EC-to-Alexa et connexion École Directe : https://$DOMAIN_VALUE/
 =======================================================================
 EOF
 if [ -z "$SKILL_ID" ] || [ -z "$VENDOR_ID" ]; then
-	warn "Skill pas encore renseignée : créez-la (README, étape 4), puis relancez ./install.sh pour saisir ALEXA_SKILL_ID et ALEXA_VENDOR_ID."
+	warn "Skill pas encore renseignée : créez-la (guide : branche configuration-alexa-skill), puis relancez ./install.sh pour saisir ALEXA_SKILL_ID et ALEXA_VENDOR_ID."
 else
 	info "Skill $SKILL_ID configurée, liaison de compte active."
 fi
