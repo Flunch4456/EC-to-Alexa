@@ -1,5 +1,15 @@
-ecole.example.fr {
-    reverse_proxy /oauth/* 127.0.0.1:8001
-    reverse_proxy /alexa 127.0.0.1:8001
-    reverse_proxy 127.0.0.1:8000
+# Utilisé par le service « caddy » de docker-compose.yml.
+# DOMAIN vient du fichier .env ; Caddy obtient et renouvelle le certificat HTTPS.
+{$DOMAIN} {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	request_body {
+		max_size 64KB
+	}
+	reverse_proxy /oauth/* oauth:8001
+	reverse_proxy /alexa oauth:8001
+	reverse_proxy web:8000
 }

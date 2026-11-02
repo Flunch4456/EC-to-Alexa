@@ -2,11 +2,14 @@ services:
   web:
     build: .
     ports:
-      - "127.0.0.1:8000:8000"
+      # 127.0.0.1 par défaut : l'accès public passe par Caddy en HTTPS.
+      - "${EXPOSE_ADDR:-127.0.0.1}:${WEB_PORT:-8000}:8000"
     env_file:
       - .env
     environment:
       ECO_TO_ALEXA_HOST: 0.0.0.0
+      # Caddy (réseau Docker) est autorisé à transmettre l'IP réelle du client.
+      ECO_TO_ALEXA_TRUSTED_PROXIES: ${ECO_TO_ALEXA_TRUSTED_PROXIES:-172.16.0.0/12}
     volumes:
       - ec_to_alexa_data:/data
     restart: unless-stopped
@@ -19,14 +22,61 @@ services:
     build: .
     command: ["python", "oauth_server.py"]
     ports:
-      - "127.0.0.1:8001:8001"
+      - "${EXPOSE_ADDR:-127.0.0.1}:${OAUTH_PORT:-8001}:8001"
     env_file:
       - .env
     environment:
       ECO_TO_ALEXA_HOST: 0.0.0.0
+      # Caddy (réseau Docker) est autorisé à transmettre l'IP réelle du client.
+      ECO_TO_ALEXA_TRUSTED_PROXIES: ${ECO_TO_ALEXA_TRUSTED_PROXIES:-172.16.0.0/12}
     volumes:
       - ec_to_alexa_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  caddy:
+    # Reverse proxy HTTPS intégré. Si un autre proxy (Zoraxy, Nginx Proxy
+    # Manager…) occupe déjà 80/443, utilisez COMPOSE_PROFILES=router.
+    profiles: ["caddy"]
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+      - oauth
+    restart: unless-stopped
+  router:
+    # Routeur HTTP interne derrière un proxy existant qui gère déjà HTTPS :
+    # une seule règle vers EXPOSE_ADDR:ROUTER_PORT suffit. Zoraxy retire le
+    # préfixe des répertoires virtuels, ce qui casserait /oauth/* et /alexa.
+    profiles: ["router"]
+    image: caddy:2
+    ports:
+      - "${EXPOSE_ADDR:-127.0.0.1}:${ROUTER_PORT:-8080}:8080"
+      # HTTPS interne (certificat de router-tls/, créé par install.sh).
+      - "${EXPOSE_ADDR:-127.0.0.1}:${ROUTER_TLS_PORT:-8443}:8443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile.router:/etc/caddy/Caddyfile:ro
+      - ./router-tls:/etc/caddy/tls:ro
+    depends_on:
+      - web
+      - oauth
     restart: unless-stopped
 
 volumes:
   ec_to_alexa_data:
+  caddy_data:
+  caddy_config:

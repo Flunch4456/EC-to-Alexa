@@ -19,3 +19,5 @@ env/
 .coverage
 dist/
 build/
+# Certificat interne du routeur (clé privée) : jamais dans Git ni dans l'image.
+router-tls/
