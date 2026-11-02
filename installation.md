@@ -387,6 +387,12 @@ Les intitulés peuvent varier légèrement selon la version de Zoraxy.
    sans message clair.
 5. N'activez pas d'authentification Zoraxy (Basic Auth, SSO) sur cette
    règle : Alexa ne pourrait plus appeler `/alexa` ni `/oauth/token`.
+6. **Status → Advance Settings → Minimum TLS Version : TLS v1.2** (pas 1.3).
+   Le service Alexa qui appelle l'endpoint de la skill négocie en TLS 1.2 :
+   avec un minimum à 1.3, la connexion est coupée pendant la négociation, la
+   requête n'apparaît dans aucun journal (ni Zoraxy ni serveur) et Alexa
+   répond « Je ne parviens pas à accéder à la Skill demandée ». La liaison de
+   compte, elle, fonctionne quand même, ce qui rend le problème trompeur.
 
 ### Z5. Vérifier
 
@@ -417,6 +423,7 @@ curl -s -X POST -H "Content-Type: application/json" -d '{}' https://ec-to-alexa.
 | « Cette page n'existe pas » ou `{"error": "not_found"}` sur `/oauth/authorize` | Répertoire virtuel Zoraxy qui retire le préfixe : supprimez-le, une seule règle d'hôte suffit. |
 | `{"error": "oauth_not_configured"}` | `ALEXA_VENDOR_ID` ou le secret client manquent : relancez `./install.sh`. |
 | `{"error": "alexa_not_configured"}` | `ALEXA_SKILL_ID` manquant : relancez `./install.sh`. |
+| Alexa : « Je ne parviens pas à accéder à la Skill demandée », rien dans `docker compose logs oauth` | La requête n'atteint pas le serveur : dans Zoraxy, Minimum TLS Version doit être TLS v1.2 (voir Z4, point 6). Le Device Log de la console (onglet Test) indique `SKILL_ENDPOINT_ERROR`. |
 | Trop de redirections (308) | Le Caddy HTTPS intégré tourne encore : relancez avec `COMPOSE_PROFILES=router`. |
 | `502 Bad Gateway` ou 521 « Web server is down » (page Zoraxy) | Zoraxy ne joint pas le serveur : `EXPOSE_ADDR` resté à `127.0.0.1` alors que Zoraxy est sur une autre machine, mauvais port, ou « Require TLS » activé vers le port HTTP 8080 (utilisez 8443). |
 
