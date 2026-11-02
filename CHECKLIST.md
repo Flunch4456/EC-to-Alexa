@@ -50,7 +50,17 @@ déploiement.
 - [x] Account Linking : trois URL de redirection Amazon via `ALEXA_VENDOR_ID`,
   secret client vérifié (HTTP Basic ou corps), démarrage sans configuration
   Alexa.
-- [ ] Vérifier la signature des requêtes Amazon avant publication publique.
+- [x] Vérifier la signature des requêtes Amazon (`Signature-256`, chaîne de
+  certificats jusqu'à une racine de confiance, SAN `echo-api.amazon.com`).
+- [x] Terminer le QCM École Directe depuis le site et mémoriser l'appareil
+  (UUID, cn/cv chiffrés) pour éviter un QCM à chaque requête Alexa.
+- [x] Interface web : accueil, tableau de bord en trois étapes, simulateur
+  « Essayer sans enceinte », révocation Alexa, page de liaison OAuth.
+- [x] Caddy optionnel (`COMPOSE_PROFILES`) pour un reverse proxy existant.
+- [x] Skill « Mon Carnet Scolaire » créée dans la console Amazon (fr-FR,
+  Custom, Provision your own) et modèle vocal importé.
+- [ ] Console Amazon : endpoint HTTPS et Account Linking, une fois le domaine
+  public en place (valeurs affichées par `install.sh`).
 - [x] Brancher le healthcheck sur le processus web principal.
 - [x] Ajouter une configuration reverse proxy avec en-têtes de sécurité,
   HTTPS et limites de taille.

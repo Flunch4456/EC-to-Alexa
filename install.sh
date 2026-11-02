@@ -43,7 +43,12 @@ if ! docker info >/dev/null 2>&1; then
 fi
 $DOCKER compose version >/dev/null 2>&1 || die "Le plugin « docker compose » est introuvable."
 
-if systemctl is-active --quiet caddy 2>/dev/null; then
+# Caddy intégré sauf si .env contient explicitement « COMPOSE_PROFILES= » (vide).
+USES_CADDY=1
+if [ -f .env ] && grep -qE '^COMPOSE_PROFILES=$' .env; then
+	USES_CADDY=""
+fi
+if [ -n "$USES_CADDY" ] && systemctl is-active --quiet caddy 2>/dev/null; then
 	die "Un Caddy installé hors Docker occupe déjà les ports 80/443. Arrêtez-le avec « sudo systemctl disable --now caddy », puis relancez ./install.sh."
 fi
 
@@ -88,6 +93,7 @@ default_env ECO_TO_ALEXA_DB "/data/ec_to_alexa.sqlite3"
 default_env ECO_TO_ALEXA_SECURE_COOKIES "1"
 default_env EXPOSE_ADDR "127.0.0.1"
 default_env ALEXA_OAUTH_CLIENT_ID "ec-to-alexa"
+grep -qE '^COMPOSE_PROFILES=' .env || set_env COMPOSE_PROFILES caddy
 # Les affectations propagent l'échec d'openssl à set -e (un argument ne le ferait pas).
 if [ -z "$(get_env ECO_TO_ALEXA_SECRET_KEY)" ]; then
 	# Clé Fernet : 32 octets en base64 url-safe, avec le « = » final obligatoire.
@@ -118,7 +124,7 @@ if [ -z "$DOMAIN_IP" ]; then
 elif [ -n "$PUBLIC_IP" ] && [ "$DOMAIN_IP" != "$PUBLIC_IP" ]; then
 	warn "$DOMAIN_VALUE pointe vers $DOMAIN_IP mais l'IP publique de ce serveur est $PUBLIC_IP."
 fi
-if command -v ufw >/dev/null 2>&1 && $SUDO env LC_ALL=C ufw status 2>/dev/null | grep -q "Status: active"; then
+if [ -n "$USES_CADDY" ] && command -v ufw >/dev/null 2>&1 && $SUDO env LC_ALL=C ufw status 2>/dev/null | grep -q "Status: active"; then
 	info "Ouverture des ports 80 et 443 dans ufw"
 	$SUDO ufw allow 80/tcp >/dev/null
 	$SUDO ufw allow 443/tcp >/dev/null
@@ -134,10 +140,12 @@ info "Démarrage des services"
 $DOCKER compose up -d --remove-orphans
 
 info "Vérification"
+CHECK_HOST="$(get_env EXPOSE_ADDR)"
+case "$CHECK_HOST" in ""|0.0.0.0) CHECK_HOST=127.0.0.1 ;; esac
 for port in 8000 8001; do
 	ok=""
 	for _ in $(seq 1 15); do
-		if curl -fsS --max-time 3 "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; then ok=1; break; fi
+		if curl -fsS --max-time 3 "http://$CHECK_HOST:$port/healthz" >/dev/null 2>&1; then ok=1; break; fi
 		sleep 2
 	done
 	[ -n "$ok" ] || warn "Le service du port $port ne répond pas : $DOCKER compose logs --tail=50"
@@ -151,6 +159,7 @@ fi
 # --- 5. Récapitulatif -------------------------------------------------------
 cat <<EOF
 
+$( [ -n "$USES_CADDY" ] || printf '%s\n' "Reverse proxy externe : envoyez https://$DOMAIN_VALUE/oauth/* et /alexa vers $CHECK_HOST:8001, tout le reste vers $CHECK_HOST:8000." )
 ==================== Valeurs pour la console Alexa ====================
 Endpoint (Build > Endpoint > HTTPS)
   URL            : https://$DOMAIN_VALUE/alexa

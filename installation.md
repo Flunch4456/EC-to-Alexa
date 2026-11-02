@@ -174,6 +174,28 @@ Caddy obtient et renouvelle automatiquement le certificat TLS. Si Caddy a
 déjà été installé avec apt lors d'une version précédente, arrêtez-le pour
 libérer les ports : `sudo systemctl disable --now caddy`.
 
+#### Avec un reverse proxy existant (Zoraxy, Nginx Proxy Manager…)
+
+Si les ports 80/443 sont déjà utilisés par un autre proxy, désactivez Caddy
+dans `.env` et exposez les deux services à une adresse que le proxy peut
+joindre :
+
+```bash
+COMPOSE_PROFILES=
+EXPOSE_ADDR=127.0.0.1   # ou l'IP locale du serveur si le proxy est sur une autre machine
+```
+
+Dans le proxy, pour le domaine public, avec un certificat Let's Encrypt :
+
+| Chemin | Destination |
+| --- | --- |
+| `/oauth/*` et `/alexa` | `http://EXPOSE_ADDR:8001` |
+| tout le reste | `http://EXPOSE_ADDR:8000` |
+
+Le proxy doit transmettre `X-Forwarded-For`. Si l'adresse vue par les
+conteneurs n'est pas dans `172.16.0.0/12`, ajoutez-la à
+`ECO_TO_ALEXA_TRUSTED_PROXIES`. Relancez ensuite `./install.sh`.
+
 ### 5. Mises à jour, arrêt et sauvegardes
 
 Lors de la première installation, rendez le script exécutable :

@@ -8,6 +8,8 @@ services:
       - .env
     environment:
       ECO_TO_ALEXA_HOST: 0.0.0.0
+      # Caddy (réseau Docker) est autorisé à transmettre l'IP réelle du client.
+      ECO_TO_ALEXA_TRUSTED_PROXIES: ${ECO_TO_ALEXA_TRUSTED_PROXIES:-172.16.0.0/12}
     volumes:
       - ec_to_alexa_data:/data
     restart: unless-stopped
@@ -25,6 +27,8 @@ services:
       - .env
     environment:
       ECO_TO_ALEXA_HOST: 0.0.0.0
+      # Caddy (réseau Docker) est autorisé à transmettre l'IP réelle du client.
+      ECO_TO_ALEXA_TRUSTED_PROXIES: ${ECO_TO_ALEXA_TRUSTED_PROXIES:-172.16.0.0/12}
     volumes:
       - ec_to_alexa_data:/data
     restart: unless-stopped
@@ -34,6 +38,9 @@ services:
       timeout: 5s
       retries: 3
   caddy:
+    # Reverse proxy HTTPS intégré. Si un autre proxy (Zoraxy, Nginx Proxy
+    # Manager…) occupe déjà 80/443, mettez COMPOSE_PROFILES= (vide) dans .env.
+    profiles: ["caddy"]
     image: caddy:2
     ports:
       - "80:80"

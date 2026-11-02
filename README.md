@@ -6,7 +6,7 @@ Une skill Alexa qui lit tes données École Directe à voix haute :
 > — « Pour demain, tu as 2 devoirs. En Français : lire le chapitre 3. En Mathématiques : exercices 4 et 5 page 32. »
 
 Elle répond aussi pour l'emploi du temps, le prochain cours, les dernières
-notes, les absences et les nouveaux messages.
+notes, les prochaines évaluations, les absences et les nouveaux messages.
 
 ## Ce qui est déjà préconfiguré
 
@@ -18,7 +18,8 @@ ce qui se passe **sur le serveur** :
   identifiants École Directe, secret OAuth) ;
 - démarre trois conteneurs : le site de comptes (`web`), la liaison Alexa et
   le webhook de la skill (`oauth`), et **Caddy**, qui obtient tout seul le
-  certificat HTTPS exigé par Alexa ;
+  certificat HTTPS exigé par Alexa (désactivable si tu as déjà un reverse
+  proxy comme Zoraxy, voir [Dépannage](#dépannage)) ;
 - ouvre les ports 80/443 dans `ufw` s'il est actif ;
 - lance les tests, puis affiche **les valeurs exactes à coller dans la console
   Amazon**.
@@ -90,13 +91,14 @@ Vérifie depuis ton téléphone, **en 4G** (hors du Wi-Fi), que
    12 caractères. C'est le compte EC-to-Alexa, celui que tu saisiras dans
    l'application Alexa ; il est différent du compte École Directe.
 3. Saisis ton identifiant et ton mot de passe **École Directe**, puis
-   **Enregistrer la connexion chiffrée**. Le message « Connexion EcoleDirecte
-   vérifiée et chiffrée » doit apparaître.
-
-> Si École Directe demande sa **question de sécurité** (QCM), le serveur ne
-> peut pas y répondre à ta place et refuse la connexion. Connecte-toi une fois
-> sur [ecoledirecte.com](https://www.ecoledirecte.com), réponds à la question,
-> puis réessaie.
+   **Connecter École Directe**. Si École Directe pose sa **question de
+   sécurité** (QCM), elle s'affiche sur la page : réponds-y. La réponse est
+   mémorisée (chiffrée) pour que la question ne revienne pas à chaque demande
+   à Alexa.
+4. Le tableau de bord affiche « École Directe est connecté ». La section
+   **Essayer sans enceinte** permet de poser une question et de lire ce
+   qu'Alexa répondrait, avec tes vraies données, avant même d'avoir lié la
+   skill.
 
 ## Étape 4 — Créer la skill dans la console Amazon
 
@@ -111,7 +113,7 @@ n'est disponible que sur les appareils de ce compte.
    - Template : **Start from Scratch**, puis **Create Skill**.
 2. **Build → Interaction Model → JSON Editor** : remplace tout le contenu par
    celui de
-   [`fr-FR.json`](https://raw.githubusercontent.com/Flunch4456/EC-to-Alexa/feature/alexa-skill/skill-package/interactionModels/custom/fr-FR.json),
+   [`fr-FR.json`](https://raw.githubusercontent.com/Flunch4456/EC-to-Alexa/main/skill-package/interactionModels/custom/fr-FR.json),
    puis **Save** et **Build skill**. Attends le message « Build Successful ».
 3. **Build → Endpoint** :
    - choisis **HTTPS** ;
@@ -209,15 +211,19 @@ Les journaux se consultent avec `docker compose logs --tail=100 web oauth caddy`
 | Page de liaison : `invalid_request` | Le Client ID de la console n'est pas `ec-to-alexa`, ou le Vendor ID saisi est faux. |
 | « Il y a eu un problème avec la réponse de la skill » | L'identifiant de skill dans `.env` ne correspond pas, ou le serveur est arrêté. Relance `./install.sh`. |
 | « Je n'arrive pas à joindre École Directe » | Mot de passe École Directe changé ou question de sécurité demandée : reconnecte École Directe sur `https://ton-domaine/`. |
+| J'ai déjà un reverse proxy (Zoraxy, Nginx Proxy Manager…) sur 80/443 | Dans `.env`, mets `COMPOSE_PROFILES=` (vide) pour ne pas lancer Caddy, et `EXPOSE_ADDR` à l'adresse que ton proxy peut joindre (`127.0.0.1` s'il est sur la même machine, sinon l'IP locale du serveur). Dans le proxy : `https://ton-domaine/oauth/*` et `https://ton-domaine/alexa` → port **8001**, tout le reste → port **8000**, avec un certificat Let's Encrypt. Relance `./install.sh`. |
 | Accéder au site en HTTP depuis le réseau local | Dans `.env`, mets `EXPOSE_ADDR=0.0.0.0` et `ECO_TO_ALEXA_SECURE_COOKIES=0`, puis `docker compose up -d`. Ports 8000/8001 en clair : à éviter sur un réseau partagé. |
 
 ## Sécurité
 
 - Les identifiants École Directe sont chiffrés (Fernet) avec la clé de `.env`.
   Ne partage jamais ce fichier et sauvegarde-le avec la base.
-- Le webhook refuse les requêtes d'une autre skill et celles de plus de
-  150 secondes. La vérification de signature Amazon reste à ajouter avant une
-  publication publique ; elle n'est pas nécessaire en mode Development.
+- Le webhook vérifie chaque requête comme l'exige Amazon : signature
+  `Signature-256`, certificat `echo-api.amazon.com` remontant à une autorité
+  de confiance, identifiant de skill et horodatage de moins de 150 secondes.
+  Il reste fermé tant que `ALEXA_SKILL_ID` n'est pas renseigné.
+- Le site n'utilise aucun JavaScript ; formulaires protégés par jeton CSRF,
+  cookies `HttpOnly`/`Secure`/`SameSite=Lax`, limitation de débit.
 - Sauvegardes, détails Docker et configuration avancée :
   [`installation.md`](./installation.md) et
   [`configuration.md`](./configuration.md). Suivi : [`CHECKLIST.md`](./CHECKLIST.md).
@@ -230,7 +236,10 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -p "test_*.py" -v
 ```
 
-Les tests n'effectuent aucun appel réseau. [`web.py`](./web.py) ouvre une
+Les tests n'effectuent aucun appel réseau. Pour lancer le site en local :
+`ECO_TO_ALEXA_SECURE_COOKIES=0` et une clé `ECO_TO_ALEXA_SECRET_KEY` dans
+`.env`, puis `python account_server.py` (http://127.0.0.1:8000).
+[`web.py`](./web.py) ouvre une
 interface locale de test sur `http://127.0.0.1:8000` (connexion École
 Directe, QCM, réponses brutes de l'API). Le client
 [`ecole_directe.py`](./ecole_directe.py) s'utilise aussi directement :

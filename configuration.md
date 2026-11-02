@@ -128,14 +128,25 @@ compte Alexa.
 
 Alexa envoie le jeton OAuth dans le corps de la requête
 (`context.System.user.accessToken`) : le webhook le lit là, et répond avec
-une carte **LinkAccount** si le compte n'est pas lié. La vérification de
-signature des requêtes Amazon (`Signature-256`) reste à ajouter avant une
-publication publique ; elle n'est pas nécessaire en mode Development.
+une carte **LinkAccount** si le compte n'est pas lié.
+
+Chaque requête reçue sur `/alexa` est vérifiée par
+[`alexa_verify.py`](./alexa_verify.py) selon les règles d'Amazon :
+`SignatureCertChainUrl` en `https://s3.amazonaws.com/echo.api/…` (port 443),
+certificat valide dont le SAN contient `echo-api.amazon.com` et dont la
+chaîne remonte à une autorité racine de confiance (paquet `certifi`),
+signature `Signature-256` (SHA-256) du corps brut, horodatage
+`request.timestamp` à moins de 150 secondes et `applicationId` égal à
+`ALEXA_SKILL_ID`. Le certificat est mis en cache une heure.
+`ECO_TO_ALEXA_ALLOW_UNSIGNED_LOCAL=1` désactive uniquement la signature,
+pour des tests locaux ; ne l'activez jamais sur un serveur exposé.
 
 Le serveur `account_server.py` vérifie la connexion EcoleDirecte avant de
-chiffrer les identifiants. Un compte qui déclenche le QCM doit d'abord
-terminer ce QCM manuellement avec `web.py`, car aucun contournement n'est
-autorisé.
+chiffrer les identifiants. Si EcoleDirecte demande son QCM, la question est
+affichée sur le tableau de bord ; l'élève y répond lui-même (aucun
+contournement). L'UUID d'appareil et les valeurs `cn`/`cv` obtenues sont
+chiffrés avec la liaison afin que les reconnexions d'Alexa ne redéclenchent
+pas le QCM.
 
 Après une connexion réussie, l'identifiant interne du compte web est affiché
 dans le tableau de bord, et l'identifiant élève est enregistré uniquement
