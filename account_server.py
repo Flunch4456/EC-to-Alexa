@@ -4,34 +4,19 @@ from __future__ import annotations
 
 import html
 import os
-import secrets
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from application import AccountStore
+from application import AccountStore, SharedRateLimiter, read_body, trusted_client_address
 from ecole_directe import EcoleDirecteClient, EcoleDirecteError
 
 
-class RateLimiter:
-    def __init__(self) -> None:
-        self.attempts: dict[str, list[float]] = {}
-
-    def allow(self, key: str, limit: int = 10, window: int = 60) -> bool:
-        now = time.time()
-        values = [stamp for stamp in self.attempts.get(key, []) if now - stamp < window]
-        if len(values) >= limit:
-            self.attempts[key] = values
-            return False
-        values.append(now)
-        self.attempts[key] = values
-        return True
+RATE_LIMITER = SharedRateLimiter()
 
 
 class AccountHandler(BaseHTTPRequestHandler):
     store: AccountStore
-    csrf_tokens: dict[str, str] = {}
-    limiter = RateLimiter()
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
@@ -41,18 +26,24 @@ class AccountHandler(BaseHTTPRequestHandler):
             self._send(200, "text/html", self._page())
         elif path == "/dashboard":
             self._dashboard()
-        elif path == "/logout":
-            self._logout()
         else:
             self._send(404, "text/plain", "Not found")
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if not self.limiter.allow(self.client_address[0]):
+        if not RATE_LIMITER.allow((trusted_client_address(self),)):
             self._send(429, "text/plain", "Trop de requêtes.")
             return
-        fields = self._fields()
         try:
+            fields = self._fields()
+            if not RATE_LIMITER.allow(("global",), limit=1000):
+                self._send(429, "text/plain", "Trop de requêtes.")
+                return
+            if path in {"/login", "/register"}:
+                account_key = fields.get("email", "").strip().lower() or "missing-account"
+                if not RATE_LIMITER.allow((f"account:{account_key}",), limit=5):
+                    self._send(429, "text/plain", "Trop de requêtes.")
+                    return
             if path == "/register":
                 self._register(fields)
             elif path == "/login":
@@ -61,10 +52,12 @@ class AccountHandler(BaseHTTPRequestHandler):
                 self._connect(fields)
             elif path == "/disconnect-ecole-directe":
                 self._disconnect(fields)
+            elif path == "/logout":
+                self._logout(fields)
             else:
                 self._send(404, "text/plain", "Not found")
-        except (ValueError, PermissionError, RuntimeError) as error:
-            self._send(400, "text/html", self._page(html.escape(str(error))))
+        except (ValueError, PermissionError, RuntimeError):
+            self._send(400, "text/html", self._page("Requête refusée ou identifiants invalides."))
 
     def _register(self, fields: dict[str, str]) -> None:
         self.store.register(fields.get("email", ""), fields.get("password", ""))
@@ -72,15 +65,14 @@ class AccountHandler(BaseHTTPRequestHandler):
 
     def _login(self, fields: dict[str, str]) -> None:
         token = self.store.login(fields.get("email", ""), fields.get("password", ""))
-        csrf = secrets.token_urlsafe(24)
-        self.csrf_tokens[token] = csrf
+        self.store.issue_csrf(token)
         self._set_cookie("session", token, secure=self._is_secure())
         self._send(200, "text/html", self._page("Connexion réussie."))
 
     def _connect(self, fields: dict[str, str]) -> None:
         session = self._cookie("session")
         user_id = self.store.user_for_token(session)
-        if not secrets.compare_digest(self.csrf_tokens.get(session, ""), fields.get("csrf", "")):
+        if not self.store.check_csrf(session, fields.get("csrf", "")):
             raise PermissionError("Jeton CSRF invalide.")
         identifiant = fields.get("identifiant", "").strip()
         password = fields.get("ecole_password", "")
@@ -114,7 +106,7 @@ class AccountHandler(BaseHTTPRequestHandler):
     def _disconnect(self, fields: dict[str, str]) -> None:
         session = self._cookie("session")
         user_id = self.store.user_for_token(session)
-        if not secrets.compare_digest(self.csrf_tokens.get(session, ""), fields.get("csrf", "")):
+        if not self.store.check_csrf(session, fields.get("csrf", "")):
             raise PermissionError("Jeton CSRF invalide.")
         self.store.delete_ecole_directe_connection(user_id)
         self.store.audit(user_id, "ecole_directe_disconnected")
@@ -134,11 +126,12 @@ class AccountHandler(BaseHTTPRequestHandler):
             ),
         )
 
-    def _logout(self) -> None:
+    def _logout(self, fields: dict[str, str]) -> None:
         session = self._cookie("session")
         if session:
+            if not self.store.check_csrf(session, fields.get("csrf", "")):
+                raise PermissionError("Jeton CSRF invalide.")
             self.store.logout(session)
-            self.csrf_tokens.pop(session, None)
         self._set_cookie("session", "", max_age=0, secure=self._is_secure())
         self._send(200, "text/html", self._page("Session fermée."))
 
@@ -151,7 +144,7 @@ class AccountHandler(BaseHTTPRequestHandler):
             try:
                 user_id = self.store.user_for_token(session)
                 authenticated = True
-                csrf = self.csrf_tokens.get(session, "")
+                csrf = self.store.issue_csrf(session)
                 connected = self.store.has_ecole_directe_connection(user_id)
             except PermissionError:
                 pass
@@ -173,7 +166,9 @@ class AccountHandler(BaseHTTPRequestHandler):
                 f"<form method='post' action='/disconnect-ecole-directe'>"
                 f"<input type='hidden' name='csrf' value='{html.escape(csrf, quote=True)}'>"
                 "<button type='submit'>Déconnecter EcoleDirecte</button></form>"
-                "<p><a href='/logout'>Déconnexion</a></p>"
+                f"<form method='post' action='/logout'>"
+                f"<input type='hidden' name='csrf' value='{html.escape(csrf, quote=True)}'>"
+                "<button type='submit'>Déconnexion</button></form>"
             )
             if authenticated
             else (
@@ -195,11 +190,9 @@ class AccountHandler(BaseHTTPRequestHandler):
         )
 
     def _fields(self) -> dict[str, str]:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length > 32_768:
-            raise ValueError("Requête trop volumineuse.")
+        body = read_body(self, "application/x-www-form-urlencoded")
         return {key: values[0] for key, values in parse_qs(
-            self.rfile.read(length).decode("utf-8")
+            body.decode("utf-8", "strict"), strict_parsing=True
         ).items()}
 
     def _cookie(self, name: str) -> str:
@@ -217,7 +210,7 @@ class AccountHandler(BaseHTTPRequestHandler):
         self._pending_cookie = flags
 
     def _is_secure(self) -> bool:
-        return os.environ.get("ECO_TO_ALEXA_SECURE_COOKIES", "0") == "1"
+        return os.environ.get("ECO_TO_ALEXA_SECURE_COOKIES", "1") != "0"
 
     def _send(self, status: int, content_type: str, body: str) -> None:
         encoded = body.encode("utf-8")
@@ -243,8 +236,9 @@ def main() -> None:
         raise SystemExit("Configure ECO_TO_ALEXA_SECRET_KEY avec une clé Fernet.")
     store = AccountStore(os.environ.get("ECO_TO_ALEXA_DB", "ec_to_alexa.sqlite3"), key.encode())
     AccountHandler.store = store
-    server = ThreadingHTTPServer(("0.0.0.0", 8000), AccountHandler)
-    print("Serveur comptes disponible sur http://0.0.0.0:8000")
+    host = os.environ.get("ECO_TO_ALEXA_HOST", "127.0.0.1")
+    server = ThreadingHTTPServer((host, int(os.environ.get("ECO_TO_ALEXA_ACCOUNT_PORT", "8000"))), AccountHandler)
+    print(f"Serveur comptes disponible sur http://{host}:{server.server_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

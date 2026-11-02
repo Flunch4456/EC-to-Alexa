@@ -20,12 +20,12 @@ from alexa_speech import (
     school_year,
 )
 from application import AccountStore, AlexaSkill, OAuthAccountLinking
+from alexa_verify import AlexaRequestVerifier, AlexaVerificationError
 from oauth_server import (
     OAuthHandler,
     alexa_access_token,
     oauth_from_env,
     redirect_uris_from_env,
-    valid_alexa_envelope,
 )
 
 TODAY = date(2026, 11, 2)  # lundi
@@ -223,18 +223,26 @@ class AlexaEnvelopeTests(unittest.TestCase):
         self.assertEqual(alexa_access_token(self.envelope()), "jeton")
 
     def test_skill_id_and_timestamp_are_checked(self):
-        now = datetime(2026, 11, 2, 8, 31, tzinfo=timezone.utc)
-        self.assertTrue(valid_alexa_envelope(self.envelope(), "amzn1.ask.skill.test", now))
-        self.assertFalse(valid_alexa_envelope(self.envelope(), "autre", now))
-        self.assertFalse(valid_alexa_envelope(
-            self.envelope("2026-11-02T08:00:00Z"), "amzn1.ask.skill.test", now))
+        now = datetime(2026, 11, 2, 8, 31, tzinfo=timezone.utc).timestamp()
+        verifier = AlexaRequestVerifier(
+            "amzn1.ask.skill.test", verify_signature=False, clock=lambda: now
+        )
+        verifier.verify({}, b"", self.envelope())
+        with self.assertRaises(AlexaVerificationError):
+            AlexaRequestVerifier("autre", verify_signature=False, clock=lambda: now).verify(
+                {}, b"", self.envelope())
+        with self.assertRaises(AlexaVerificationError):
+            verifier.verify({}, b"", self.envelope("2026-11-02T08:00:00Z"))
 
     def test_webhook_answers_over_http(self):
         # Régression : le corps était lu deux fois et la requête restait bloquée.
         with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as tmp:
             store = AccountStore(tmp.name)
-        OAuthHandler.oauth = OAuthAccountLinking(store, "alexa", "https://example.test/cb")
+        OAuthHandler.oauth = OAuthAccountLinking(store, "alexa", "https://example.test/cb", "s")
         OAuthHandler.skill = AlexaSkill(store)
+        OAuthHandler.verifier = AlexaRequestVerifier(
+            "amzn1.ask.skill.test", verify_signature=False
+        )
         server = ThreadingHTTPServer(("127.0.0.1", 0), OAuthHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
@@ -244,12 +252,14 @@ class AlexaEnvelopeTests(unittest.TestCase):
             request = urllib.request.Request(
                 f"http://127.0.0.1:{server.server_port}/alexa",
                 data=json.dumps(body).encode(), method="POST",
+                headers={"Content-Type": "application/json"},
             )
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             with opener.open(request, timeout=5) as response:
                 payload = json.load(response)
             self.assertEqual(payload["response"]["card"], {"type": "LinkAccount"})
         finally:
+            OAuthHandler.verifier = None
             server.shutdown()
             server.server_close()
             store.close()

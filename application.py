@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
+import json
 import html
+import os
 import secrets
 import sqlite3
+import threading
 import time
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -27,13 +31,89 @@ from alexa_speech import (
     next_school_day,
     school_year,
 )
-from ecole_directe import EcoleDirecteClient, EcoleDirecteError
+from ecole_directe import EcoleDirecteClient, EcoleDirecteError, EcoleDirecteQcmRequired
+
+MAX_BODY_SIZE = 32_768
+
+
+class SharedRateLimiter:
+    """Bounded, process-wide limiter shared by all authentication endpoints."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._attempts: dict[str, list[float]] = {}
+        self._last_cleanup = 0.0
+
+    def allow(self, keys: tuple[str, ...], limit: int = 10, window: int = 60) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_cleanup >= 60:
+                self._attempts = {
+                    key: values
+                    for key, values in self._attempts.items()
+                    if values and now - values[-1] < window
+                }
+                self._last_cleanup = now
+            allowed = True
+            for key in keys:
+                values = [stamp for stamp in self._attempts.get(key, []) if now - stamp < window]
+                if len(values) >= limit:
+                    allowed = False
+                values.append(now)
+                self._attempts[key] = values[-limit:]
+            return allowed
+
+
+def _is_trusted_proxy(address: str) -> bool:
+    """Adresses exactes ou plages CIDR listées dans ECO_TO_ALEXA_TRUSTED_PROXIES."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    for value in os.environ.get("ECO_TO_ALEXA_TRUSTED_PROXIES", "").split(","):
+        value = value.strip()
+        if not value:
+            continue
+        try:
+            if ip in ipaddress.ip_network(value, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def trusted_client_address(handler: Any) -> str:
+    """Use forwarded addresses only when the immediate proxy is explicitly trusted."""
+    address = handler.client_address[0]
+    if _is_trusted_proxy(address):
+        forwarded = handler.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
+        if forwarded and len(forwarded) <= 64:
+            return forwarded
+    return address
+
+
+def read_body(handler: Any, content_type: str, max_size: int = MAX_BODY_SIZE) -> bytes:
+    """Read exactly one bounded UTF-8 request body with an unambiguous length."""
+    raw_length = handler.headers.get("Content-Length")
+    if raw_length is None or "," in raw_length or not raw_length.strip().isdigit():
+        raise ValueError("Content-Length invalide.")
+    length = int(raw_length.strip())
+    if length < 0 or length > max_size:
+        raise ValueError("Requête trop volumineuse.")
+    actual_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if actual_type != content_type:
+        raise ValueError("Content-Type invalide.")
+    body = handler.rfile.read(length)
+    if len(body) != length:
+        raise ValueError("Corps de requête incomplet.")
+    return body
 
 
 class AccountStore:
     """Small SQLite-backed account and token store with tenant isolation."""
 
     def __init__(self, path: str = "ec_to_alexa.sqlite3", secret_key: bytes | None = None) -> None:
+        self._lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
@@ -73,6 +153,11 @@ class AccountStore:
                 user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
                 event TEXT NOT NULL,
                 created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS csrf_tokens (
+                session_hash TEXT PRIMARY KEY,
+                token_hash TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
             );
             """
         )
@@ -123,11 +208,16 @@ class AccountStore:
         return int(cursor.lastrowid)
 
     def user_for_login(self, email: str, password: str) -> int:
-        row = self.db.execute(
-            "SELECT id, password_hash FROM users WHERE email = ? COLLATE NOCASE",
-            (email.strip(),),
-        ).fetchone()
-        if not row or not self._password_matches(password, row["password_hash"]):
+        with self._lock:
+            row = self.db.execute(
+                "SELECT id, password_hash FROM users WHERE email = ? COLLATE NOCASE",
+                (email.strip(),),
+            ).fetchone()
+        # Keep the work factor similar for unknown accounts.
+        valid = row and self._password_matches(password, row["password_hash"])
+        if not row:
+            self._password_matches(password, self._password_hash("invalid-account"))
+        if not valid:
             raise PermissionError("Identifiants invalides.")
         return int(row["id"])
 
@@ -153,8 +243,11 @@ class AccountStore:
         return int(row["user_id"])
 
     def logout(self, token: str) -> None:
-        self.db.execute("DELETE FROM sessions WHERE token_hash = ?", (self._hash_token(token),))
-        self.db.commit()
+        with self._lock:
+            token_hash = self._hash_token(token)
+            self.db.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+            self.db.execute("DELETE FROM csrf_tokens WHERE session_hash = ?", (token_hash,))
+            self.db.commit()
 
     def has_ecole_directe_connection(self, user_id: int) -> bool:
         return (
@@ -193,36 +286,64 @@ class AccountStore:
     def exchange_authorization_code(
         self, code: str, client_id: str, redirect_uri: str
     ) -> str:
-        row = self.db.execute(
-            """
-            SELECT user_id FROM oauth_codes
-            WHERE code_hash = ? AND client_id = ? AND redirect_uri = ?
-              AND expires_at > ? AND used = 0
-            """,
-            (self._hash_token(code), client_id, redirect_uri, int(time.time())),
-        ).fetchone()
-        if not row:
-            raise PermissionError("Code OAuth invalide, expiré ou déjà utilisé.")
-        self.db.execute(
-            "UPDATE oauth_codes SET used = 1 WHERE code_hash = ?",
-            (self._hash_token(code),),
-        )
-        token = self.create_alexa_token(int(row["user_id"]))
-        self.db.commit()
-        return token
+        with self._lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            row = self.db.execute(
+                """
+                SELECT user_id FROM oauth_codes
+                WHERE code_hash = ? AND client_id = ? AND redirect_uri = ?
+                  AND expires_at > ? AND used = 0
+                """,
+                (self._hash_token(code), client_id, redirect_uri, int(time.time())),
+            ).fetchone()
+            if not row:
+                self.db.rollback()
+                raise PermissionError("Code OAuth invalide, expiré ou déjà utilisé.")
+            updated = self.db.execute(
+                "UPDATE oauth_codes SET used = 1 WHERE code_hash = ? AND used = 0",
+                (self._hash_token(code),),
+            ).rowcount
+            if updated != 1:
+                self.db.rollback()
+                raise PermissionError("Code OAuth invalide, expiré ou déjà utilisé.")
+            token = secrets.token_urlsafe(32)
+            self.db.execute(
+                "INSERT INTO alexa_tokens VALUES (?, ?, ?)",
+                (self._hash_token(token), int(row["user_id"]), int(time.time()) + 31_536_000),
+            )
+            self.db.commit()
+            return token
 
     def revoke_alexa_token(self, token: str) -> None:
-        self.db.execute(
-            "DELETE FROM alexa_tokens WHERE token_hash = ?", (self._hash_token(token),)
-        )
-        self.db.commit()
+        with self._lock:
+            self.db.execute(
+                "DELETE FROM alexa_tokens WHERE token_hash = ?", (self._hash_token(token),)
+            )
+            self.db.commit()
 
     def save_ecole_directe_connection(
-        self, user_id: int, identifiant: str, mot_de_passe: str, student_id: str
+        self,
+        user_id: int,
+        identifiant: str,
+        mot_de_passe: str,
+        student_id: str,
+        device_uuid: str | None = None,
+        cn: str | None = None,
+        cv: str | None = None,
     ) -> None:
         if self._fernet is None:
             raise RuntimeError("ECO_TO_ALEXA_SECRET_KEY est requis pour chiffrer la connexion.")
-        payload = f"{identifiant}\x00{mot_de_passe}".encode("utf-8")
+        # L'UUID d'appareil et les valeurs cn/cv du QCM sont conservés (chiffrés)
+        # pour que les reconnexions d'Alexa ne redéclenchent pas le QCM.
+        payload = json.dumps(
+            {
+                "identifiant": identifiant,
+                "mot_de_passe": mot_de_passe,
+                "device_uuid": device_uuid,
+                "cn": cn,
+                "cv": cv,
+            }
+        ).encode("utf-8")
         encrypted = self._fernet.encrypt(payload)
         self.db.execute(
             """
@@ -235,28 +356,59 @@ class AccountStore:
                 student_id=excluded.student_id,
                 updated_at=excluded.updated_at
             """,
-            (user_id, encrypted, student_id, int(time.time())),
+            (user_id, encrypted, student_id, time.time_ns() // 1000),
         )
         self.db.commit()
 
-    def ecole_directe_client(self, user_id: int) -> EcoleDirecteClient | None:
-        if self._fernet is None:
-            raise RuntimeError("ECO_TO_ALEXA_SECRET_KEY est requis pour déchiffrer la connexion.")
+    def ecole_directe_client(
+        self, user_id: int, timeout: float = 20
+    ) -> EcoleDirecteClient | None:
         row = self.db.execute(
             "SELECT encrypted_credentials, student_id FROM ecole_directe_connections WHERE user_id = ?",
             (user_id,),
         ).fetchone()
         if not row:
             return None
+        if self._fernet is None:
+            raise RuntimeError("ECO_TO_ALEXA_SECRET_KEY est requis pour déchiffrer la connexion.")
         try:
-            identifiant, mot_de_passe = self._fernet.decrypt(row["encrypted_credentials"]).decode(
-                "utf-8"
-            ).split("\x00", 1)
+            raw = self._fernet.decrypt(row["encrypted_credentials"]).decode("utf-8")
+            if raw.startswith("{"):
+                data = json.loads(raw)
+            else:  # format historique « identifiant\x00mot_de_passe »
+                identifiant, mot_de_passe = raw.split("\x00", 1)
+                data = {"identifiant": identifiant, "mot_de_passe": mot_de_passe}
         except (InvalidToken, UnicodeDecodeError, ValueError) as error:
             raise RuntimeError("Connexion EcoleDirecte chiffrée illisible.") from error
-        client = EcoleDirecteClient(identifiant, mot_de_passe)
+        client = EcoleDirecteClient(
+            data["identifiant"],
+            data["mot_de_passe"],
+            device_uuid=data.get("device_uuid"),
+            cn=data.get("cn"),
+            cv=data.get("cv"),
+            timeout=timeout,
+        )
         client.student_id = row["student_id"]
         return client
+
+    def ecole_directe_version(self, user_id: int) -> int | None:
+        """Horodatage de la liaison : change à chaque reconnexion ou suppression."""
+        row = self.db.execute(
+            "SELECT updated_at FROM ecole_directe_connections WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return int(row["updated_at"]) if row else None
+
+    def alexa_link_count(self, user_id: int) -> int:
+        row = self.db.execute(
+            "SELECT COUNT(*) FROM alexa_tokens WHERE user_id = ? AND expires_at > ?",
+            (user_id, int(time.time())),
+        ).fetchone()
+        return int(row[0])
+
+    def revoke_alexa_for_user(self, user_id: int) -> None:
+        with self._lock:
+            self.db.execute("DELETE FROM alexa_tokens WHERE user_id = ?", (user_id,))
+            self.db.commit()
 
     def ecole_directe_info(self, user_id: int) -> dict[str, str | None] | None:
         row = self.db.execute(
@@ -265,11 +417,56 @@ class AccountStore:
         ).fetchone()
         if not row:
             return None
-        return {"student_id": row["student_id"], "updated_at": str(row["updated_at"])}
+        stamp = int(row["updated_at"])
+        if stamp > 10**11:  # microsecondes depuis la version qui sert de jeton de cache
+            stamp //= 1_000_000
+        return {"student_id": row["student_id"], "updated_at": str(stamp)}
 
     def delete_ecole_directe_connection(self, user_id: int) -> None:
-        self.db.execute("DELETE FROM ecole_directe_connections WHERE user_id = ?", (user_id,))
-        self.db.commit()
+        with self._lock:
+            self.db.execute("DELETE FROM ecole_directe_connections WHERE user_id = ?", (user_id,))
+            self.db.execute("DELETE FROM alexa_tokens WHERE user_id = ?", (user_id,))
+            self.db.commit()
+
+    def issue_csrf(self, session: str, ttl: int = 86_400) -> str:
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            self.db.execute(
+                "INSERT OR REPLACE INTO csrf_tokens VALUES (?, ?, ?)",
+                (self._hash_token(session), self._hash_token(token), int(time.time()) + ttl),
+            )
+            self.db.commit()
+        return token
+
+    def check_csrf(self, session: str, token: str) -> bool:
+        if not session or not token:
+            return False
+        with self._lock:
+            row = self.db.execute(
+                "SELECT token_hash, expires_at FROM csrf_tokens WHERE session_hash = ?",
+                (self._hash_token(session),),
+            ).fetchone()
+        return bool(
+            row
+            and row["expires_at"] > int(time.time())
+            and hmac.compare_digest(row["token_hash"], self._hash_token(token))
+        )
+
+    def purge_expired(self, limit: int = 100) -> None:
+        with self._lock:
+            now = int(time.time())
+            for table, column in (
+                ("sessions", "expires_at"),
+                ("alexa_tokens", "expires_at"),
+                ("oauth_codes", "expires_at"),
+                ("csrf_tokens", "expires_at"),
+            ):
+                self.db.execute(
+                    f"DELETE FROM {table} WHERE rowid IN "
+                    f"(SELECT rowid FROM {table} WHERE {column} <= ? LIMIT ?)",
+                    (now, limit),
+                )
+            self.db.commit()
 
     def delete_account(self, user_id: int) -> None:
         self.db.execute("DELETE FROM users WHERE id = ?", (user_id,))
@@ -350,7 +547,8 @@ def _now() -> datetime:
     try:
         from zoneinfo import ZoneInfo
 
-        return datetime.now(ZoneInfo("Europe/Paris")).replace(tzinfo=None)
+        zone = os.environ.get("ECO_TO_ALEXA_TIMEZONE", "Europe/Paris")
+        return datetime.now(ZoneInfo(zone)).replace(tzinfo=None)
     except Exception:  # tzdata absent (Windows) : heure locale de la machine
         return datetime.now()
 
@@ -364,6 +562,7 @@ class AlexaSkill:
         "mes dernières notes, mes absences ou mes nouveaux messages."
     )
     REPROMPT = "Que veux-tu savoir ? Par exemple : mes devoirs pour demain."
+    CACHE_TTL = 900
 
     def __init__(
         self,
@@ -372,8 +571,12 @@ class AlexaSkill:
         clock: Any = _now,
     ) -> None:
         self.store = store
+        # Services injectés (tests) : utilisés tels quels, sans rechargement.
         self.services = services if services is not None else {}
         self.clock = clock
+        # Cache des clients connectés : user_id -> (version, expiration, service).
+        self._cache: dict[int, tuple[int, float, EcoleDirecteService]] = {}
+        self._cache_lock = threading.Lock()
 
     @classmethod
     def from_store(cls, store: AccountStore) -> "AlexaSkill":
@@ -382,11 +585,28 @@ class AlexaSkill:
         return cls(store)
 
     def _service_for(self, user_id: int) -> EcoleDirecteService | None:
-        service = self.services.get(user_id)
-        if service is None and self.store._fernet is not None:
-            client = self.store.ecole_directe_client(user_id)
-            if client is not None:
-                service = self.services[user_id] = EcoleDirecteService(client)
+        if user_id in self.services:
+            return self.services[user_id]
+        if self.store._fernet is None:
+            return None
+        # La version est relue à chaque requête : une déconnexion ou une
+        # reconnexion École Directe prend effet immédiatement.
+        version = self.store.ecole_directe_version(user_id)
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._cache.get(user_id)
+            if version is None:
+                self._cache.pop(user_id, None)
+                return None
+            if cached and cached[0] == version and cached[1] > now:
+                return cached[2]
+        # Alexa attend une réponse en moins de 8 secondes.
+        client = self.store.ecole_directe_client(user_id, timeout=6)
+        if client is None:
+            return None
+        service = EcoleDirecteService(client)
+        with self._cache_lock:
+            self._cache[user_id] = (version, now + self.CACHE_TTL, service)
         return service
 
     def handle(self, access_token: str | None, request: dict[str, Any]) -> dict[str, Any]:
@@ -419,6 +639,12 @@ class AlexaSkill:
             )
         try:
             text = self._answer(service, name, intent.get("slots") or {})
+        except EcoleDirecteQcmRequired:
+            text = (
+                "École Directe demande de répondre à une question de sécurité. "
+                "Ouvre le site EC to Alexa, reconnecte ton compte École Directe "
+                "et réponds à la question, puis redemande-moi."
+            )
         except EcoleDirecteError:
             text = (
                 "Je n'arrive pas à joindre École Directe pour le moment. Si une "
@@ -532,9 +758,12 @@ class OAuthAccountLinking:
     def token(
         self, code: str, client_id: str, redirect_uri: str, client_secret: str = ""
     ) -> dict[str, Any]:
-        if client_id != self.client_id or redirect_uri not in self.redirect_uris:
-            raise PermissionError("Client OAuth non autorisé.")
-        if self.client_secret and not hmac.compare_digest(client_secret, self.client_secret):
+        if (
+            not self.client_secret
+            or not hmac.compare_digest(client_id, self.client_id)
+            or not hmac.compare_digest(client_secret, self.client_secret)
+            or redirect_uri not in self.redirect_uris
+        ):
             raise PermissionError("Client OAuth non autorisé.")
         access_token = self.store.exchange_authorization_code(
             code, client_id, redirect_uri
