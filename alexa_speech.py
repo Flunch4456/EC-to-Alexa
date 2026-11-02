@@ -75,6 +75,11 @@ def _clean_text(value: Any, encoded: bool = False) -> str:
     return text
 
 
+def _capitalize(text: str) -> str:
+    """Majuscule initiale sans toucher au reste (str.capitalize minusculerait « EPS »)."""
+    return text[:1].upper() + text[1:]
+
+
 def _join(parts: list[str]) -> str:
     if len(parts) <= 1:
         return "".join(parts)
@@ -113,7 +118,7 @@ def describe_timetable(result: dict[str, Any], day: date, today: date) -> str:
             details.append(part)
         message = (
             f"{label.capitalize()}, tu as {_plural(len(active), 'cours', 'cours')}, "
-            f"de {first} à {last}. {_join(details)}."
+            f"de {first} à {last}. {_capitalize(_join(details))}."
         )
     for course in cancelled:
         message += (
@@ -265,3 +270,26 @@ def describe_grades(result: dict[str, Any], limit: int = 3) -> str:
         parts.append(spoken)
     title = "Ta dernière note" if len(parts) == 1 else f"Tes {len(parts)} dernières notes"
     return f"{title} : " + " ; ".join(parts) + "."
+
+
+def describe_assessments(result: dict[str, Any], today: date, horizon: int = 14) -> str:
+    """Évaluations annoncées dans le cahier de texte résumé (indexé par date)."""
+    data = result.get("data")
+    found: list[tuple[date, str]] = []
+    if isinstance(data, dict):
+        for key, entries in data.items():
+            try:
+                day = date.fromisoformat(str(key))
+            except ValueError:
+                continue
+            if not (today <= day <= today + timedelta(days=horizon)) or not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if isinstance(entry, dict) and entry.get("interrogation"):
+                    found.append((day, _subject(entry.get("matiere"))))
+    if not found:
+        return f"Aucune évaluation n'est annoncée dans les {horizon} prochains jours."
+    found.sort()
+    parts = [f"{subject} {day_label(day, today)}" for day, subject in found[:5]]
+    intro = "Tu as une évaluation" if len(found) == 1 else f"Tu as {len(found)} évaluations"
+    return f"{intro} : {_join(parts)}."

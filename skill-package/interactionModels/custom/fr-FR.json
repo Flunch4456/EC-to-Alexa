@@ -3,11 +3,26 @@
     "languageModel": {
       "invocationName": "mon carnet scolaire",
       "intents": [
-        { "name": "AMAZON.CancelIntent", "samples": [] },
-        { "name": "AMAZON.HelpIntent", "samples": [] },
-        { "name": "AMAZON.StopIntent", "samples": [] },
-        { "name": "AMAZON.NavigateHomeIntent", "samples": [] },
-        { "name": "AMAZON.FallbackIntent", "samples": [] },
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        },
         {
           "name": "GetTodayScheduleIntent",
           "slots": [],
@@ -35,7 +50,12 @@
         },
         {
           "name": "GetScheduleIntent",
-          "slots": [{ "name": "jour", "type": "AMAZON.DATE" }],
+          "slots": [
+            {
+              "name": "jour",
+              "type": "AMAZON.DATE"
+            }
+          ],
           "samples": [
             "mon emploi du temps {jour}",
             "mon emploi du temps pour {jour}",
@@ -60,7 +80,12 @@
         },
         {
           "name": "GetHomeworkIntent",
-          "slots": [{ "name": "jour", "type": "AMAZON.DATE" }],
+          "slots": [
+            {
+              "name": "jour",
+              "type": "AMAZON.DATE"
+            }
+          ],
           "samples": [
             "mes devoirs",
             "quels sont mes devoirs",
@@ -112,6 +137,21 @@
             "j'ai des nouveaux messages",
             "lis mes messages",
             "la messagerie"
+          ]
+        },
+        {
+          "name": "GetAssessmentsIntent",
+          "slots": [],
+          "samples": [
+            "mes évaluations",
+            "mes prochaines évaluations",
+            "mes contrôles",
+            "mes prochains contrôles",
+            "est-ce que j'ai un contrôle",
+            "est-ce que j'ai une évaluation",
+            "j'ai des interros",
+            "quand est mon prochain contrôle",
+            "quelles sont mes prochaines évaluations"
           ]
         }
       ],

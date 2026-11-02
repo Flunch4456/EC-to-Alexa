@@ -16,8 +16,9 @@ CSS = """
 :root {
   --page: #eef2f9;
   --sheet: #ffffff;
-  --rule: #d5e0f3;
-  --rule-strong: #a9bde6;
+  --rule: #e4eaf6;
+  --rule-strong: #c3d1ee;
+  --field: #a9bde6;
   --margin: #e0485a;
   --ink: #1d3faf;
   --ink-dark: #142d80;
@@ -83,8 +84,8 @@ p { margin: 0 0 16px; max-width: 62ch; }
   font: italic 22px/32px var(--serif);
   color: var(--ink);
 }
-.say::before { content: "« "; }
-.say::after { content: " »"; }
+.say::before { content: "« "; }
+.say::after { content: " »"; }
 
 .panel { margin: 0 0 40px; }
 .panel > p:last-child { margin-bottom: 0; }
@@ -106,12 +107,13 @@ p { margin: 0 0 16px; max-width: 62ch; }
 .done .status { color: var(--ok); }
 
 .stack { display: grid; gap: 16px; max-width: 420px; }
-.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.row label { flex: 1 1 260px; }
 label { display: grid; gap: 4px; font: 600 14px/24px var(--sans); color: var(--muted); }
 input[type=email], input[type=password], input[type=text], select {
   width: 100%;
   padding: 8px 12px;
-  border: 1px solid var(--rule-strong);
+  border: 1px solid var(--field);
   border-radius: 4px;
   background: #fff;
   color: var(--text);
@@ -151,7 +153,7 @@ button.danger:hover { background: var(--err-bg); }
   margin: 16px 0 0;
   padding: 16px 20px;
   max-width: 62ch;
-  border: 1px solid var(--rule-strong);
+  border: 1px solid var(--field);
   border-radius: 4px;
   background: #fff;
   font: 18px/32px var(--serif);

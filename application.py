@@ -23,6 +23,7 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 from alexa_speech import (
     describe_absences,
+    describe_assessments,
     describe_grades,
     describe_homework,
     describe_messages,
@@ -539,6 +540,12 @@ class EcoleDirecteService:
             anneeMessages=school_year(date.today()),
         )
 
+    def upcoming_homework(self) -> dict[str, Any]:
+        # Résumé des devoirs à venir indexé par date (endpoint validé dans web.py).
+        if not self.client.student_id:
+            raise EcoleDirecteError("Aucun élève n'est associé à cette session.")
+        return self.client.get(f"Eleves/{self.client.student_id}/cahierdetexte.awp?verbe=get")
+
     def grades(self) -> dict[str, Any]:
         return self.client.get(self._student_endpoint("notes.awp?verbe=get"), anneeScolaire="")
 
@@ -559,7 +566,8 @@ class AlexaSkill:
     HELP = (
         "Tu peux me demander : quel est mon emploi du temps demain, "
         "c'est quoi mon prochain cours, quels sont mes devoirs pour lundi, "
-        "mes dernières notes, mes absences ou mes nouveaux messages."
+        "mes dernières notes, mes prochaines évaluations, mes absences "
+        "ou mes nouveaux messages."
     )
     REPROMPT = "Que veux-tu savoir ? Par exemple : mes devoirs pour demain."
     CACHE_TTL = 900
@@ -626,6 +634,14 @@ class AlexaSkill:
             user_id = self.store.user_for_token(access_token, "alexa_tokens")
         except PermissionError:
             return self._link_account()
+        return self.handle_for_user(user_id, request)
+
+    def handle_for_user(self, user_id: int, request: dict[str, Any]) -> dict[str, Any]:
+        """Répond pour un utilisateur déjà authentifié (webhook ou simulateur du site)."""
+        body = request.get("request", {})
+        kind = body.get("type")
+        intent = body.get("intent", {})
+        name = intent.get("name")
         service = self._service_for(user_id)
         if service is None:
             return self._response(
@@ -668,6 +684,8 @@ class AlexaSkill:
             return describe_messages(service.messages())
         if name == "GetGradesIntent":
             return describe_grades(service.grades())
+        if name in {"GetAssessmentsIntent", "GetUpcomingAssessmentsIntent"}:
+            return describe_assessments(service.upcoming_homework(), today)
         if name == "GetHomeworkIntent":
             day = self._slot_date(slots, today) or next_school_day(today)
             return describe_homework(service.homework(day), day, today)

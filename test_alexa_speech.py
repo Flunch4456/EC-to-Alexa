@@ -314,3 +314,19 @@ class OAuthConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AssessmentTests(unittest.TestCase):
+    def test_assessments_within_horizon_are_sorted(self):
+        from alexa_speech import describe_assessments
+        result = {"data": {
+            "2026-11-05": [{"matiere": "MATHEMATIQUES", "interrogation": True},
+                           {"matiere": "ANGLAIS", "interrogation": False}],
+            "2026-11-03": [{"matiere": "HISTOIRE-GEOGRAPHIE", "interrogation": True}],
+            "2026-12-20": [{"matiere": "SVT", "interrogation": True}],
+        }}
+        text = describe_assessments(result, TODAY)
+        self.assertTrue(text.startswith("Tu as 2 évaluations"))
+        self.assertLess(text.index("Histoire"), text.index("Mathematiques"))
+        self.assertNotIn("Svt", text)
+        self.assertIn("Aucune évaluation", describe_assessments({"data": {}}, TODAY))
