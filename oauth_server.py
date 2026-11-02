@@ -304,7 +304,7 @@ def main() -> None:
     OAuthHandler.skill = AlexaSkill.from_store(store)
     bind_host = os.environ.get("ECO_TO_ALEXA_OAUTH_BIND", "127.0.0.1")
     server = ThreadingHTTPServer((bind_host, 8001), OAuthHandler)
-    print(f"OAuth/Alexa server disponible sur http://{bind_host}:8001")
+    print("OAuth/Alexa server démarré.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
