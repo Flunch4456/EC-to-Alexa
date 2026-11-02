@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from cryptography.fernet import Fernet
 
@@ -92,22 +93,93 @@ class OAuthAccountLinkingTests(unittest.TestCase):
             store = AccountStore(tmp.name)
             user_id = store.register("a@example.test", "a" * 12)
             oauth = OAuthAccountLinking(
-                store, "alexa-client", "https://example.test/oauth/callback"
+                store, "alexa-client", "https://example.test/oauth/callback", "secret"
             )
             code = oauth.authorize("a@example.test", "a" * 12)
             token = oauth.token(
-                code, "alexa-client", "https://example.test/oauth/callback"
+                code,
+                "alexa-client",
+                "secret",
+                "https://example.test/oauth/callback",
+                "authorization_code",
             )["access_token"]
             self.assertEqual(store.user_for_token(token, "alexa_tokens"), user_id)
             with self.assertRaises(PermissionError):
-                oauth.token(code, "alexa-client", "https://example.test/oauth/callback")
+                oauth.token(
+                    code,
+                    "alexa-client",
+                    "secret",
+                    "https://example.test/oauth/callback",
+                    "authorization_code",
+                )
             store.close()
 
     def test_oauth_rejects_non_https_redirect_uri(self):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as tmp:
             store = AccountStore(tmp.name)
             with self.assertRaises(ValueError):
-                OAuthAccountLinking(store, "client", "http://localhost/callback")
+                OAuthAccountLinking(store, "client", "http://localhost/callback", "secret")
+            store.close()
+
+    def test_oauth_requires_client_secret_and_grant_type(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as tmp:
+            store = AccountStore(tmp.name)
+            store.register("a@example.test", "a" * 12)
+            oauth = OAuthAccountLinking(
+                store, "alexa-client", "https://example.test/oauth/callback", "secret"
+            )
+            code = oauth.authorize("a@example.test", "a" * 12)
+            with self.assertRaises(PermissionError):
+                oauth.token(
+                    code,
+                    "alexa-client",
+                    "bad-secret",
+                    "https://example.test/oauth/callback",
+                    "authorization_code",
+                )
+            with self.assertRaises(ValueError):
+                oauth.token(
+                    code,
+                    "alexa-client",
+                    "secret",
+                    "https://example.test/oauth/callback",
+                    "client_credentials",
+                )
+            store.close()
+
+    def test_oauth_authorization_code_exchange_is_atomic(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as tmp:
+            store = AccountStore(tmp.name)
+            store.register("a@example.test", "a" * 12)
+            oauth = OAuthAccountLinking(
+                store, "alexa-client", "https://example.test/oauth/callback", "secret"
+            )
+            code = oauth.authorize("a@example.test", "a" * 12)
+            results: list[str] = []
+            errors: list[str] = []
+
+            def exchange() -> None:
+                try:
+                    token = oauth.token(
+                        code,
+                        "alexa-client",
+                        "secret",
+                        "https://example.test/oauth/callback",
+                        "authorization_code",
+                    )["access_token"]
+                    results.append(token)
+                except PermissionError:
+                    errors.append("denied")
+
+            first = threading.Thread(target=exchange)
+            second = threading.Thread(target=exchange)
+            first.start()
+            second.start()
+            first.join()
+            second.join()
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(len(errors), 1)
             store.close()
 
 

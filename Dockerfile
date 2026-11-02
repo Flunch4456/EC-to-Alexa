@@ -1,8 +1,11 @@
 FROM python:3.12-slim
 
 WORKDIR /app
-COPY . .
+COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
+COPY account_server.py application.py ecole_directe.py oauth_server.py web.py /app/
+COPY README.md installation.md configuration.md CHECKLIST.md /app/
+COPY .env.example /app/.env.example
 RUN useradd --create-home appuser && mkdir /data && chown appuser:appuser /data
 USER appuser
 ENV PYTHONUNBUFFERED=1

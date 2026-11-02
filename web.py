@@ -1,8 +1,13 @@
 """Interface web locale pour lancer la connexion Ecole Directe."""
 
 import html
+import hashlib
+import hmac
 import json
+import os
 import secrets
+import threading
+import time
 from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
@@ -11,11 +16,19 @@ from ecole_directe import EcoleDirecteClient, EcoleDirecteError, redact_response
 
 
 
-# Listen on every network interface so other devices can reach the server.
-HOST = "0.0.0.0"
+HOST = os.environ.get("ECO_TO_ALEXA_WEB_BIND", "127.0.0.1")
 PORT = 8000
-CHALLENGES: dict[str, EcoleDirecteClient] = {}
-SESSIONS: dict[str, EcoleDirecteClient] = {}
+MAX_HTTP_BODY = 32_768
+CHALLENGE_TTL_SECONDS = 300
+SESSION_TTL_SECONDS = 1_800
+MAX_CACHE_ENTRIES = 512
+CSRF_SECRET = hashlib.sha256(
+    os.environ.get("ECO_TO_ALEXA_CSRF_SECRET", "local-dev-csrf").encode("utf-8")
+).digest()
+LOCK = threading.Lock()
+CHALLENGES: dict[str, dict[str, object]] = {}
+SESSIONS: dict[str, dict[str, object]] = {}
+LOGIN_ATTEMPTS: dict[str, list[float]] = {}
 SERVICES = {
     "emploi": ("Emploi du temps", "E/{student_id}/emploidutemps.awp?verbe=get&v=1.8.28"),
     "cahier": ("Cahier de texte", "Eleves/{student_id}/cahierdetexte.awp?verbe=get"),
@@ -73,6 +86,7 @@ PAGE = """<!doctype html>
       <h2>Connexion</h2>
       <p class="hint">Les identifiants sont transmis uniquement au processus local et ne sont pas enregistrés.</p>
       <form method="post" action="/login">
+        {csrf}
         <label for="identifiant">Identifiant</label>
         <input id="identifiant" name="identifiant" autocomplete="username" required>
         <label for="mot_de_passe">Mot de passe</label>
@@ -88,7 +102,7 @@ PAGE = """<!doctype html>
 </html>"""
 
 
-def render_qcm(challenge_id: str, data: dict[str, object]) -> str:
+def render_qcm(challenge_id: str, csrf: str, data: dict[str, object]) -> str:
     question = html.escape(str(data.get("question", "Question de sécurité")))
     propositions = data.get("propositions") or []
     options = "".join(
@@ -99,30 +113,43 @@ def render_qcm(challenge_id: str, data: dict[str, object]) -> str:
     return (
         '<section class="qcm"><p class="qcm-title">Vérification de sécurité</p>'
         f"<p>{question}</p>"
-        f'<form method="post" action="/qcm"><input type="hidden" name="challenge" '
+        f'<form method="post" action="/qcm"><input type="hidden" name="csrf" value="{html.escape(csrf, quote=True)}"><input type="hidden" name="challenge" '
         f'value="{html.escape(challenge_id, quote=True)}">{options}'
         '<button type="submit">Valider la réponse</button></form></section>'
     )
 
 
-def render_services(session_id: str) -> str:
+def render_services(session_id: str, csrf: str) -> str:
     buttons = "".join(
         f'<button type="submit" name="service" value="{key}">{html.escape(label)}</button>'
         for key, (label, _) in SERVICES.items()
     )
     return (
         '<section class="services"><p class="services-title">Que voulez-vous consulter ?</p>'
-        f'<form method="post" action="/service"><input type="hidden" name="session" '
+        f'<form method="post" action="/service"><input type="hidden" name="csrf" value="{html.escape(csrf, quote=True)}"><input type="hidden" name="session" '
         f'value="{html.escape(session_id, quote=True)}"><div class="service-grid">{buttons}'
         '</div></form></section>'
     )
 
 
-def render(result: str = "", error: bool = False, qcm: str = "", services: str = "") -> bytes:
+def render(
+    result: str = "",
+    error: bool = False,
+    qcm: str = "",
+    services: str = "",
+    csrf: str = "",
+) -> bytes:
     result_html = ""
     if result:
         result_html = f'<pre class="result{" error" if error else ""}">{html.escape(result)}</pre>'
-    return PAGE.replace("{qcm}", qcm).replace("{services}", services).replace("{result}", result_html).encode("utf-8")
+    csrf_html = f'<input type="hidden" name="csrf" value="{html.escape(csrf, quote=True)}">' if csrf else ""
+    return (
+        PAGE.replace("{qcm}", qcm)
+        .replace("{services}", services)
+        .replace("{result}", result_html)
+        .replace("{csrf}", csrf_html)
+        .encode("utf-8")
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -133,15 +160,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/":
             self.send_error(404)
             return
-        self._send(200, render())
+        self._send(200, render(csrf=self._csrf_token()))
 
     def do_POST(self) -> None:
         if self.path not in ("/login", "/qcm", "/service"):
             self.send_error(404)
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        form = parse_qs(self.rfile.read(length).decode("utf-8"))
+        form = parse_qs(self._read_body().decode("utf-8"))
         try:
+            self._cleanup_state()
+            self._validate_csrf(form)
             if self.path == "/login":
                 self._login(form)
             elif self.path == "/qcm":
@@ -149,15 +177,18 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._service(form)
         except EcoleDirecteError as error:
-            self._send(502, render(str(error), error=True))
+            self._send(502, render(str(error), error=True, csrf=self._csrf_token()))
         except (KeyError, ValueError):
-            self._send(400, render("La requête de connexion est invalide.", error=True))
+            self._send(400, render("La requête de connexion est invalide.", error=True, csrf=self._csrf_token()))
 
     def _login(self, form: dict[str, list[str]]) -> None:
+        if not self._allow_login():
+            self._send(429, render("Trop de tentatives, réessayez plus tard.", error=True, csrf=self._csrf_token()))
+            return
         identifiant = form.get("identifiant", [""])[0].strip()
         mot_de_passe = form.get("mot_de_passe", [""])[0]
         if not identifiant or not mot_de_passe:
-            self._send(400, render("Les deux champs sont obligatoires.", error=True))
+            self._send(400, render("Les deux champs sont obligatoires.", error=True, csrf=self._csrf_token()))
             return
 
         client = EcoleDirecteClient(identifiant, mot_de_passe)
@@ -165,32 +196,47 @@ class Handler(BaseHTTPRequestHandler):
         if result.get("code") in (250, "250"):
             qcm = client.get_qcm()
             challenge_id = secrets.token_urlsafe(24)
-            CHALLENGES[challenge_id] = client
-            self._send(200, render(qcm=render_qcm(challenge_id, qcm.get("data") or {})))
+            csrf = self._csrf_token()
+            with LOCK:
+                CHALLENGES[challenge_id] = {"client": client, "created_at": time.time(), "attempts": 0}
+            self._send(200, render(qcm=render_qcm(challenge_id, csrf, qcm.get("data") or {}), csrf=csrf))
             return
         self._show_services(client)
 
     def _answer_qcm(self, form: dict[str, list[str]]) -> None:
         challenge_id = form.get("challenge", [""])[0]
         choice = form.get("choix", [""])[0]
-        client = CHALLENGES.get(challenge_id)
+        with LOCK:
+            challenge = CHALLENGES.get(challenge_id)
+        client = challenge["client"] if isinstance(challenge, dict) else None
         if not client or not choice:
             raise ValueError("Défi QCM introuvable")
+        with LOCK:
+            if isinstance(challenge, dict):
+                challenge["attempts"] = int(challenge.get("attempts", 0)) + 1
+                if int(challenge["attempts"]) > 5:
+                    CHALLENGES.pop(challenge_id, None)
+                    raise ValueError("Trop d'essais QCM.")
         result = client.complete_qcm(choice)
-        CHALLENGES.pop(challenge_id, None)
+        with LOCK:
+            CHALLENGES.pop(challenge_id, None)
         self._show_services(client)
 
     def _show_services(self, client: EcoleDirecteClient) -> None:
         if not client.student_id:
             raise EcoleDirecteError("Impossible de trouver l'identifiant de l'élève.")
         session_id = secrets.token_urlsafe(24)
-        SESSIONS[session_id] = client
-        self._send(200, render(services=render_services(session_id)))
+        csrf = self._csrf_token()
+        with LOCK:
+            SESSIONS[session_id] = {"client": client, "created_at": time.time()}
+        self._send(200, render(services=render_services(session_id, csrf), csrf=csrf))
 
     def _service(self, form: dict[str, list[str]]) -> None:
         session_id = form.get("session", [""])[0]
         service = form.get("service", [""])[0]
-        client = SESSIONS.get(session_id)
+        with LOCK:
+            session_data = SESSIONS.get(session_id)
+        client = session_data["client"] if isinstance(session_data, dict) else None
         if not client or service not in SERVICES:
             raise ValueError("Session ou service invalide")
         _, endpoint_template = SERVICES[service]
@@ -210,7 +256,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"Aucune donnée trouvée entre le {start:%d/%m/%Y} et le {end:%d/%m/%Y}.\n\n"
                 f"Réponse API :\n{response_text}"
             )
-        self._send(200, render(response_text))
+        self._send(200, render(response_text, csrf=self._csrf_token()))
 
     def _send(
         self,
@@ -222,10 +268,98 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; form-action 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
+        if hasattr(self, "_pending_cookies"):
+            for cookie in self._pending_cookies:
+                self.send_header("Set-Cookie", cookie)
+            del self._pending_cookies
         self.end_headers()
         self.wfile.write(body)
+
+    def _read_body(self) -> bytes:
+        values = self.headers.get_all("Content-Length", [])
+        if len(values) != 1:
+            raise ValueError("Content-Length ambigu.")
+        raw = values[0].strip()
+        if not raw.isdigit():
+            raise ValueError("Content-Length invalide.")
+        length = int(raw)
+        if length < 0 or length > MAX_HTTP_BODY:
+            raise ValueError("Requête trop volumineuse.")
+        content_type = self.headers.get("Content-Type", "")
+        media_type, _, charset_part = content_type.partition(";")
+        if media_type.strip().lower() != "application/x-www-form-urlencoded":
+            raise ValueError("Content-Type invalide.")
+        if charset_part:
+            if "charset=" not in charset_part.lower():
+                raise ValueError("charset invalide.")
+            charset = charset_part.split("=", 1)[1].strip().lower().strip('"')
+            if charset != "utf-8":
+                raise ValueError("charset invalide.")
+        return self.rfile.read(length)
+
+    def _cookie(self, name: str) -> str:
+        header = self.headers.get("Cookie", "")
+        for item in header.split(";"):
+            key, _, value = item.strip().partition("=")
+            if key == name:
+                return value
+        return ""
+
+    def _set_cookie(self, name: str, value: str, max_age: int = 86_400) -> None:
+        flags = f"{name}={value}; Max-Age={max_age}; HttpOnly; SameSite=Lax; Path=/"
+        if os.environ.get("ECO_TO_ALEXA_ALLOW_INSECURE_HTTP", "0") != "1":
+            flags += "; Secure"
+        if not hasattr(self, "_pending_cookies"):
+            self._pending_cookies = []
+        self._pending_cookies.append(flags)
+
+    def _csrf_context(self) -> str:
+        browser = self._cookie("browser")
+        if not browser:
+            browser = secrets.token_urlsafe(24)
+            self._set_cookie("browser", browser, max_age=86_400 * 30)
+        return browser
+
+    def _csrf_token(self) -> str:
+        return hmac.new(CSRF_SECRET, self._csrf_context().encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def _validate_csrf(self, form: dict[str, list[str]]) -> None:
+        provided = form.get("csrf", [""])[0]
+        if not provided:
+            raise ValueError("Jeton CSRF invalide.")
+        expected = self._csrf_token()
+        if not secrets.compare_digest(provided, expected):
+            raise ValueError("Jeton CSRF invalide.")
+
+    def _allow_login(self) -> bool:
+        now = time.time()
+        key = self.client_address[0]
+        with LOCK:
+            values = [stamp for stamp in LOGIN_ATTEMPTS.get(key, []) if now - stamp < 60]
+            if len(values) >= 12:
+                LOGIN_ATTEMPTS[key] = values
+                return False
+            values.append(now)
+            LOGIN_ATTEMPTS[key] = values
+            return True
+
+    def _cleanup_state(self) -> None:
+        now = time.time()
+        with LOCK:
+            for challenge_id, data in list(CHALLENGES.items()):
+                if now - float(data.get("created_at", 0)) > CHALLENGE_TTL_SECONDS:
+                    CHALLENGES.pop(challenge_id, None)
+            for session_id, data in list(SESSIONS.items()):
+                if now - float(data.get("created_at", 0)) > SESSION_TTL_SECONDS:
+                    SESSIONS.pop(session_id, None)
+            while len(CHALLENGES) > MAX_CACHE_ENTRIES:
+                CHALLENGES.pop(next(iter(CHALLENGES)))
+            while len(SESSIONS) > MAX_CACHE_ENTRIES:
+                SESSIONS.pop(next(iter(SESSIONS)))
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -233,7 +367,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Site disponible sur http://0.0.0.0:{PORT}")
+    print(f"Site disponible sur http://{HOST}:{PORT}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

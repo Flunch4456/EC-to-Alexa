@@ -31,11 +31,11 @@ Copy-Item .env.example .env
 ```
 
 Copiez la clé affichée dans `ECO_TO_ALEXA_SECRET_KEY` du fichier `.env`.
-Conservez ce fichier hors de Git. Le serveur écoute sur toutes les interfaces :
-depuis la machine, utilisez `http://127.0.0.1:8000` ; depuis un autre appareil,
-utilisez `http://ADRESSE_IP_DU_PC:8000`. Autorisez le port 8000 dans le pare-feu
-Windows si nécessaire. N'utilisez pas le serveur standard-library directement
-sur Internet : il n'a ni TLS ni les protections nécessaires à un service public.
+Conservez ce fichier hors de Git. Par défaut, le serveur écoute en loopback
+(`http://127.0.0.1:8000`). Pour autoriser HTTP local explicite, définissez
+`ECO_TO_ALEXA_ALLOW_INSECURE_HTTP=1`. Pour une exposition réseau (LAN/Internet),
+publiez via un reverse proxy TLS et configurez explicitement l'adresse d'écoute
+avec `ECO_TO_ALEXA_ACCOUNT_BIND=0.0.0.0`.
 
 Le formulaire de `account_server.py` permet de créer un compte web, de se
 connecter, puis d'associer EcoleDirecte. Le tableau de bord est disponible
@@ -44,17 +44,18 @@ affiché sont ceux de la session courante ; aucune valeur d'un autre compte
 n'est réutilisée.
 
 Pour lancer séparément les routes OAuth de test, définissez d'abord
-`ALEXA_OAUTH_CLIENT_ID` et `ALEXA_OAUTH_REDIRECT_URI` dans `.env`, puis
+`ALEXA_OAUTH_CLIENT_ID`, `ALEXA_OAUTH_CLIENT_SECRET` et
+`ALEXA_OAUTH_REDIRECT_URI` dans `.env`, puis
 ouvrez un second terminal :
 
 ```powershell
 .\.venv\Scripts\python.exe .\oauth_server.py
 ```
 
-Le serveur OAuth écoute sur toutes les interfaces, sur le port 8001. Depuis un
-autre appareil, utilisez `http://ADRESSE_IP_DU_PC:8001`. En production, le
-reverse proxy doit publier ces routes sous HTTPS ; Alexa ne doit jamais être
-configurée avec une URL HTTP ou une adresse loopback.
+Le serveur OAuth écoute en loopback par défaut (`127.0.0.1:8001`). En
+production, publiez les routes via reverse proxy HTTPS et définissez
+`ECO_TO_ALEXA_OAUTH_BIND=0.0.0.0` dans le conteneur uniquement si nécessaire.
+Alexa ne doit jamais être configurée avec une URL HTTP ou une adresse loopback.
 
 ## Installation Docker
 
@@ -68,9 +69,8 @@ docker compose up -d
 docker compose logs -f web
 ```
 
-Le compose publie les ports `8000` et `8001` sur toutes les interfaces
-(`0.0.0.0`). Utilisez `http://ADRESSE_IP_DU_SERVEUR:8000` pour l'interface web
-et `http://ADRESSE_IP_DU_SERVEUR:8001` pour OAuth. Le compose conserve la base
+Le compose publie les ports `8000` et `8001` sur loopback
+(`127.0.0.1`) par défaut. Le compose conserve la base
 dans le volume `ec_to_alexa_data` et lance les services comptes et OAuth
 séparément. Pour Internet, placez de préférence un reverse proxy HTTPS devant
 ces ports et n'exposez directement que les ports 80 et 443.
@@ -143,12 +143,11 @@ docker compose ps
 docker compose logs --tail=100 web oauth
 ```
 
-Les services sont publiés sur toutes les interfaces (`0.0.0.0:8000` et
-`0.0.0.0:8001`) et sont donc accessibles depuis les autres machines du réseau
-ou via l'adresse IP publique si le pare-feu et le routeur l'autorisent. Le
-volume Docker `ec_to_alexa_data` conserve la base SQLite lors des mises à jour.
-Pour limiter l'exposition, autorisez uniquement les ports nécessaires dans le
-pare-feu et préférez Caddy en HTTPS pour une exposition Internet.
+Les services Docker restent accessibles depuis l'hôte local via
+`127.0.0.1:8000` et `127.0.0.1:8001`. Le volume Docker `ec_to_alexa_data`
+conserve la base SQLite lors des mises à jour. Pour exposer au réseau, modifiez
+explicitement le mapping de ports (`0.0.0.0:...`) et placez un reverse proxy
+TLS ; ne supposez pas qu'un pare-feu compense une mauvaise publication.
 
 Pour un accès direct temporaire par adresse IP depuis l'extérieur, ouvrez aussi
 les ports applicatifs dans le pare-feu et configurez la redirection de ports

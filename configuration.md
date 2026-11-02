@@ -20,7 +20,11 @@ par Git. Les variables reconnues par le client actuel sont :
 | `ECOLE_DIRECTE_MOT_DE_PASSE` | Non | Mot de passe utilisé par le script CLI. |
 | `ECO_TO_ALEXA_DB` | Non | Chemin de la base SQLite de la fondation comptes. |
 | `ALEXA_OAUTH_CLIENT_ID` | Pour OAuth | Identifiant client déclaré dans Alexa. |
+| `ALEXA_OAUTH_CLIENT_SECRET` | Pour OAuth | Secret client Alexa (fourni hors code, jamais en dur). |
 | `ALEXA_OAUTH_REDIRECT_URI` | Pour OAuth | URI HTTPS autorisée par Alexa, exactement à l'identique. |
+| `ALEXA_SKILL_ID` | Pour webhook Alexa | Skill ID attendu dans la requête Alexa. |
+| `ALEXA_PROXY_SIGNATURE_VALIDATION` | Oui en prod | `1` pour exiger la validation de signature par proxy interne approuvé. |
+| `ECO_TO_ALEXA_TRUSTED_PROXIES` | Non | Réseaux autorisés à fournir `X-Forwarded-For`. |
 
 Générez une clé Fernet une seule fois et stockez-la uniquement dans `.env` ou
 dans le gestionnaire de secrets du serveur :
@@ -65,8 +69,8 @@ python -m unittest discover -p "test_*.py" -v
 ```
 
 Elle crée des utilisateurs, hache les mots de passe et sépare les jetons web
-des jetons Alexa. Elle ne persiste volontairement pas encore les identifiants
-EcoleDirecte.
+des jetons Alexa. Les identifiants EcoleDirecte sont chiffrés avec Fernet avant
+persistation dans SQLite lorsque `ECO_TO_ALEXA_SECRET_KEY` est fourni.
 
 ## 3. Configuration Amazon Alexa
 
@@ -75,9 +79,7 @@ EcoleDirecte.
 Un fournisseur OAuth 2.0 avec code d'autorisation est maintenant disponible
 dans `oauth_server.py` pour le test derrière un reverse proxy HTTPS. Le serveur
 local écoute sur `127.0.0.1:8001` et expose `/oauth/authorize`,
-`/oauth/token`, `/oauth/revoke` et `/alexa`. Il faut encore brancher le
-registre de services EcoleDirecte persistant et effectuer la validation
-Amazon sur un domaine réel avant publication.
+`/oauth/token`, `/oauth/revoke` et `/alexa`.
 
 Pour un test local, lancez `account_server.py` sur le port 8000 et `oauth_server.py` sur
 le port 8001. La contrainte HTTPS de l'URI de redirection reste volontaire :
@@ -124,8 +126,9 @@ comme secret OAuth.
 
 - Utiliser HTTPS derrière un reverse proxy en production.
 - Définir une clé de secrets hors du dépôt avant de persister des connexions.
-- Ajouter CSRF, limitation de débit, rotation/révocation des sessions et
-  vérification d'e-mail avant une mise en ligne.
+- Conserver un proxy HTTPS en frontal avec validation de signature Alexa
+  maintenue et injecter `X-Alexa-Signature-Verified: 1` uniquement depuis un
+  réseau interne approuvé.
 - Ne pas écrire les requêtes scolaires, mots de passe ou jetons dans les
   journaux.
 - Ne jamais utiliser les données d'un autre `user_id` pour répondre à Alexa.
