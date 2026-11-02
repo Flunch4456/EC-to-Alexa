@@ -1,5 +1,11 @@
 # Installation du serveur
 
+> **Méthode recommandée :** sur un serveur Debian/Ubuntu, clonez le dépôt et
+> lancez `./install.sh`, qui installe Docker, génère `.env`, démarre les
+> services avec Caddy en HTTPS et affiche les valeurs pour la console Alexa.
+> Toutes les étapes sont dans le [README](./README.md). Ce document détaille
+> l'installation manuelle, utile pour le développement ou le dépannage.
+
 ## Prérequis
 
 - Python 3.12 ou plus récent ;
@@ -68,12 +74,13 @@ docker compose up -d
 docker compose logs -f web
 ```
 
-Le compose publie les ports `8000` et `8001` sur toutes les interfaces
-(`0.0.0.0`). Utilisez `http://ADRESSE_IP_DU_SERVEUR:8000` pour l'interface web
-et `http://ADRESSE_IP_DU_SERVEUR:8001` pour OAuth. Le compose conserve la base
-dans le volume `ec_to_alexa_data` et lance les services comptes et OAuth
-séparément. Pour Internet, placez de préférence un reverse proxy HTTPS devant
-ces ports et n'exposez directement que les ports 80 et 443.
+Le compose lance trois services : `web` (comptes, port 8000), `oauth`
+(liaison Alexa et webhook, port 8001) et `caddy` (HTTPS sur 80/443 pour le
+domaine `DOMAIN` de `.env`). Les ports 8000 et 8001 sont publiés sur
+`127.0.0.1` par défaut ; mettez `EXPOSE_ADDR=0.0.0.0` (et
+`ECO_TO_ALEXA_SECURE_COOKIES=0`) pour y accéder en HTTP depuis le réseau
+local. La base est conservée dans le volume `ec_to_alexa_data` et le
+certificat dans `caddy_data`.
 
 Arrêt et mise à jour :
 
@@ -124,7 +131,8 @@ Générez une clé Fernet et copiez-la dans `ECO_TO_ALEXA_SECRET_KEY` du fichier
 `.env`. Utilisez une clé aléatoire différente pour chaque installation :
 
 ```bash
-openssl rand -base64 32 | tr "+/" "-_" | tr -d "=\n"; echo
+# Le « = » final fait partie de la clé : ne le supprimez pas.
+openssl rand -base64 32 | tr "+/" "-_"
 nano .env
 ```
 
@@ -143,58 +151,28 @@ docker compose ps
 docker compose logs --tail=100 web oauth
 ```
 
-Les services sont publiés sur toutes les interfaces (`0.0.0.0:8000` et
-`0.0.0.0:8001`) et sont donc accessibles depuis les autres machines du réseau
-ou via l'adresse IP publique si le pare-feu et le routeur l'autorisent. Le
-volume Docker `ec_to_alexa_data` conserve la base SQLite lors des mises à jour.
-Pour limiter l'exposition, autorisez uniquement les ports nécessaires dans le
-pare-feu et préférez Caddy en HTTPS pour une exposition Internet.
+Le volume Docker `ec_to_alexa_data` conserve la base SQLite lors des mises à
+jour. Les ports 8000 et 8001 restent sur `127.0.0.1` (voir `EXPOSE_ADDR`) :
+l'accès public passe uniquement par Caddy en HTTPS.
 
-Pour un accès direct temporaire par adresse IP depuis l'extérieur, ouvrez aussi
-les ports applicatifs dans le pare-feu et configurez la redirection de ports
-sur le routeur, si le serveur est derrière une box :
+### 4. HTTPS avec Caddy
 
-```bash
-sudo ufw allow 8000/tcp
-sudo ufw allow 8001/tcp
-```
-
-Ces ports sont en HTTP et ne doivent pas être utilisés pour saisir des
-identifiants sur Internet. Pour une utilisation publique, utilisez plutôt le
-nom de domaine et HTTPS avec Caddy.
-
-### 4. Installer Caddy et activer HTTPS
-
-Installez Caddy depuis son dépôt officiel, puis activez-le :
+Caddy est fourni par le service `caddy` de `docker-compose.yml` ; il n'y a
+rien à installer avec apt. Renseignez `DOMAIN` dans `.env`, faites pointer le
+DNS de ce domaine vers le serveur, puis ouvrez les ports HTTP/HTTPS :
 
 ```bash
- apt install -y debian-keyring debian-archive-keyring apt-transport-https gnupg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-  |  gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-  |  tee /etc/apt/sources.list.d/caddy-stable.list
- apt update
- apt install -y caddy
- cp Caddyfile /etc/caddy/Caddyfile
- nano /etc/caddy/Caddyfile
- systemctl enable --now caddy
- systemctl reload caddy
+sudo ufw allow OpenSSH
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw enable
+docker compose up -d caddy
+docker compose logs -f caddy
 ```
 
-Dans l'éditeur, remplacez `ecole.example.fr` par votre nom de domaine. Le DNS
-de ce domaine doit pointer vers le serveur et les ports HTTP/HTTPS doivent
-être ouverts :
-
-```bash
- ufw allow OpenSSH
- ufw allow 80/tcp
- ufw allow 443/tcp
- ufw enable
-```
-
-Caddy obtient et renouvelle automatiquement le certificat TLS. Vérifiez
-ensuite `https://ecole.example.fr` et les journaux avec
-` journalctl -u caddy -f`.
+Caddy obtient et renouvelle automatiquement le certificat TLS. Si Caddy a
+déjà été installé avec apt lors d'une version précédente, arrêtez-le pour
+libérer les ports : `sudo systemctl disable --now caddy`.
 
 ### 5. Mises à jour, arrêt et sauvegardes
 
@@ -247,18 +225,9 @@ docker compose up -d
 Le nom du volume peut varier selon le nom du répertoire Compose ; vérifiez-le
 avec `docker volume ls` avant la sauvegarde.
 
-Exemple de configuration Caddy (voir aussi [`Caddyfile`](./Caddyfile)) :
-
-```caddyfile
-ecole.example.fr {
-    reverse_proxy /oauth/* 127.0.0.1:8001
-    reverse_proxy /alexa 127.0.0.1:8001
-    reverse_proxy 127.0.0.1:8000
-}
-```
-
-La gestion du certificat est alors faite par Caddy. Vérifiez les exigences
-Amazon concernant TLS avant de configurer Alexa.
+La configuration Caddy est dans [`Caddyfile`](./Caddyfile) : `/oauth/*` et
+`/alexa` vont au service `oauth`, le reste au service `web`. La sauvegarde du
+volume `caddy_data` est facultative (le certificat est redemandé si besoin).
 
 ## Vérifications après installation
 

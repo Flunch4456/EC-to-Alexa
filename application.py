@@ -502,21 +502,39 @@ class AlexaSkill:
 class OAuthAccountLinking:
     """OAuth authorization-code provider for Alexa Account Linking."""
 
-    def __init__(self, store: AccountStore, client_id: str, redirect_uri: str) -> None:
-        if not client_id or not redirect_uri.startswith("https://"):
+    def __init__(
+        self,
+        store: AccountStore,
+        client_id: str,
+        redirect_uri: str | list[str] | tuple[str, ...],
+        client_secret: str = "",
+    ) -> None:
+        # Amazon utilise une URL de redirection différente selon la région du
+        # compte Alexa : plusieurs URL peuvent donc être autorisées.
+        uris = [redirect_uri] if isinstance(redirect_uri, str) else list(redirect_uri)
+        if not client_id or not uris or not all(uri.startswith("https://") for uri in uris):
             raise ValueError("OAuth doit utiliser un client et une URL HTTPS.")
         self.store = store
         self.client_id = client_id
-        self.redirect_uri = redirect_uri
+        self.redirect_uris = tuple(uris)
+        self.redirect_uri = uris[0]
+        self.client_secret = client_secret
 
-    def authorize(self, email: str, password: str) -> str:
+    def authorize(self, email: str, password: str, redirect_uri: str | None = None) -> str:
+        redirect_uri = redirect_uri or self.redirect_uri
+        if redirect_uri not in self.redirect_uris:
+            raise PermissionError("URL de redirection non autorisée.")
         user_id = self.store.user_for_login(email, password)
         return self.store.create_authorization_code(
-            user_id, self.client_id, self.redirect_uri
+            user_id, self.client_id, redirect_uri
         )
 
-    def token(self, code: str, client_id: str, redirect_uri: str) -> dict[str, Any]:
-        if client_id != self.client_id or redirect_uri != self.redirect_uri:
+    def token(
+        self, code: str, client_id: str, redirect_uri: str, client_secret: str = ""
+    ) -> dict[str, Any]:
+        if client_id != self.client_id or redirect_uri not in self.redirect_uris:
+            raise PermissionError("Client OAuth non autorisé.")
+        if self.client_secret and not hmac.compare_digest(client_secret, self.client_secret):
             raise PermissionError("Client OAuth non autorisé.")
         access_token = self.store.exchange_authorization_code(
             code, client_id, redirect_uri

@@ -20,7 +20,13 @@ from alexa_speech import (
     school_year,
 )
 from application import AccountStore, AlexaSkill, OAuthAccountLinking
-from oauth_server import OAuthHandler, alexa_access_token, valid_alexa_envelope
+from oauth_server import (
+    OAuthHandler,
+    alexa_access_token,
+    oauth_from_env,
+    redirect_uris_from_env,
+    valid_alexa_envelope,
+)
 
 TODAY = date(2026, 11, 2)  # lundi
 TIMETABLE = {
@@ -243,6 +249,53 @@ class AlexaEnvelopeTests(unittest.TestCase):
             with opener.open(request, timeout=5) as response:
                 payload = json.load(response)
             self.assertEqual(payload["response"]["card"], {"type": "LinkAccount"})
+        finally:
+            server.shutdown()
+            server.server_close()
+            store.close()
+
+
+class OAuthConfigTests(unittest.TestCase):
+    def test_vendor_id_expands_to_every_amazon_region(self):
+        uris = redirect_uris_from_env({"ALEXA_VENDOR_ID": "M2TEST"})
+        self.assertEqual(uris, [
+            "https://layla.amazon.com/api/skill/link/M2TEST",
+            "https://pitangui.amazon.com/api/skill/link/M2TEST",
+            "https://alexa.amazon.co.jp/api/skill/link/M2TEST",
+        ])
+
+    def test_server_starts_without_alexa_configuration(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as tmp:
+            store = AccountStore(tmp.name)
+        self.assertIsNone(oauth_from_env(store, {"ALEXA_OAUTH_CLIENT_ID": "ec-to-alexa"}))
+        oauth = oauth_from_env(store, {
+            "ALEXA_OAUTH_CLIENT_ID": "ec-to-alexa",
+            "ALEXA_VENDOR_ID": "M2TEST",
+            "ALEXA_OAUTH_CLIENT_SECRET": "secret",
+        })
+        self.assertEqual(len(oauth.redirect_uris), 3)
+        self.assertEqual(oauth.client_secret, "secret")
+        store.close()
+
+    def test_token_endpoint_accepts_http_basic_credentials(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as tmp:
+            store = AccountStore(tmp.name)
+        store.register("a@example.test", "a" * 12)
+        uri = "https://layla.amazon.com/api/skill/link/M2TEST"
+        OAuthHandler.oauth = OAuthAccountLinking(store, "ec-to-alexa", uri, "s3cret")
+        OAuthHandler.skill = AlexaSkill(store)
+        code = OAuthHandler.oauth.authorize("a@example.test", "a" * 12, uri)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), OAuthHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            body = f"grant_type=authorization_code&code={code}&redirect_uri={uri}".encode()
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/oauth/token", data=body, method="POST",
+                headers={"Authorization": "Basic " + b64("ec-to-alexa:s3cret")},
+            )
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=5) as response:
+                self.assertIn("access_token", json.load(response))
         finally:
             server.shutdown()
             server.server_close()

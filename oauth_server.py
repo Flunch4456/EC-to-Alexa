@@ -6,17 +6,43 @@ listener and does not connect EcoleDirecte accounts automatically.
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 import os
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from typing import Any, Mapping
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from application import AccountStore, AlexaSkill, OAuthAccountLinking
 
 MAX_REQUEST_AGE = 150  # secondes, tolérance imposée par Amazon
+# Hôtes de redirection Account Linking d'Amazon (Europe, Amérique, Japon).
+ALEXA_LINK_HOSTS = ("layla.amazon.com", "pitangui.amazon.com", "alexa.amazon.co.jp")
+
+
+def redirect_uris_from_env(env: Mapping[str, str]) -> list[str]:
+    uris = [
+        uri.strip()
+        for uri in env.get("ALEXA_OAUTH_REDIRECT_URI", "").split(",")
+        if uri.strip()
+    ]
+    vendor_id = env.get("ALEXA_VENDOR_ID", "").strip()
+    if vendor_id:
+        uris += [f"https://{host}/api/skill/link/{vendor_id}" for host in ALEXA_LINK_HOSTS]
+    return list(dict.fromkeys(uris))
+
+
+def oauth_from_env(store: AccountStore, env: Mapping[str, str]) -> OAuthAccountLinking | None:
+    """Retourne None tant que la liaison de compte Alexa n'est pas configurée."""
+    client_id = env.get("ALEXA_OAUTH_CLIENT_ID", "").strip()
+    uris = redirect_uris_from_env(env)
+    if not client_id or not uris:
+        return None
+    return OAuthAccountLinking(
+        store, client_id, uris, env.get("ALEXA_OAUTH_CLIENT_SECRET", "").strip()
+    )
 
 
 def alexa_access_token(request: dict[str, Any]) -> str:
@@ -51,16 +77,19 @@ def valid_alexa_envelope(
 
 
 class OAuthHandler(BaseHTTPRequestHandler):
-    oauth: OAuthAccountLinking
+    oauth: OAuthAccountLinking | None
     skill: AlexaSkill
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/healthz":
-            self._send_json(200, {"status": "ok"})
+            self._send_json(200, {"status": "ok", "oauth": self.oauth is not None})
             return
         if parsed.path != "/oauth/authorize":
             self._send_json(404, {"error": "not_found"})
+            return
+        if self.oauth is None:
+            self._send_json(503, {"error": "oauth_not_configured"})
             return
         params = {key: values[0] for key, values in parse_qs(parsed.query).items()}
         if not self._valid_authorize_request(params):
@@ -75,6 +104,8 @@ class OAuthHandler(BaseHTTPRequestHandler):
             # routes OAuth un formulaire.
             if parsed.path == "/alexa":
                 self._alexa()
+            elif parsed.path.startswith("/oauth/") and self.oauth is None:
+                self._send_json(503, {"error": "oauth_not_configured"})
             elif parsed.path == "/oauth/authorize":
                 self._authorize(self._form())
             elif parsed.path == "/oauth/token":
@@ -93,19 +124,38 @@ class OAuthHandler(BaseHTTPRequestHandler):
         if not self._valid_authorize_request(params):
             self._send_json(400, {"error": "invalid_request"})
             return
-        code = self.oauth.authorize(fields.get("email", ""), fields.get("password", ""))
+        code = self.oauth.authorize(
+            fields.get("email", ""), fields.get("password", ""), params["redirect_uri"]
+        )
         query = urlencode({"code": code, "state": params["state"]})
         self.send_response(302)
         self.send_header("Location", f"{params['redirect_uri']}?{query}")
         self.end_headers()
 
     def _token(self, fields: dict[str, str]) -> None:
+        client_id, client_secret = self._client_credentials(fields)
         result = self.oauth.token(
             fields.get("code", ""),
-            fields.get("client_id", ""),
+            client_id,
             fields.get("redirect_uri", ""),
+            client_secret,
         )
         self._send_json(200, result)
+
+    def _client_credentials(self, fields: dict[str, str]) -> tuple[str, str]:
+        """Identifiants client dans le corps ou en HTTP Basic (les deux modes Alexa)."""
+        client_id = fields.get("client_id", "")
+        client_secret = fields.get("client_secret", "")
+        scheme, _, value = self.headers.get("Authorization", "").partition(" ")
+        if scheme.lower() == "basic":
+            try:
+                decoded = base64.b64decode(value).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                decoded = ""
+            basic_id, _, basic_secret = decoded.partition(":")
+            client_id = client_id or unquote(basic_id)
+            client_secret = client_secret or unquote(basic_secret)
+        return client_id, client_secret
 
     def _revoke(self, fields: dict[str, str]) -> None:
         token = fields.get("token", "")
@@ -131,7 +181,7 @@ class OAuthHandler(BaseHTTPRequestHandler):
         return (
             params.get("response_type") in (None, "", "code")
             and params.get("client_id") == self.oauth.client_id
-            and params.get("redirect_uri") == self.oauth.redirect_uri
+            and params.get("redirect_uri") in self.oauth.redirect_uris
             and bool(params.get("state"))
         )
 
@@ -179,7 +229,12 @@ class OAuthHandler(BaseHTTPRequestHandler):
 
     def _security_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'none'; form-action 'self'")
+        # Chrome applique form-action à la redirection qui suit le formulaire :
+        # les hôtes Amazon doivent donc être autorisés pour terminer la liaison.
+        form_action = " ".join(["'self'"] + [f"https://{host}" for host in ALEXA_LINK_HOSTS])
+        self.send_header(
+            "Content-Security-Policy", f"default-src 'none'; form-action {form_action}"
+        )
         self.send_header("Cache-Control", "no-store")
 
     def log_message(self, format: str, *args: object) -> None:
@@ -193,13 +248,15 @@ def main() -> None:
     store = AccountStore(
         os.getenv("ECO_TO_ALEXA_DB", "ec_to_alexa.sqlite3"), secret_key.encode()
     )
-    client_id = os.environ.get("ALEXA_OAUTH_CLIENT_ID", "")
-    redirect_uri = os.environ.get("ALEXA_OAUTH_REDIRECT_URI", "")
-    oauth = OAuthAccountLinking(store, client_id, redirect_uri)
-    OAuthHandler.oauth = oauth
+    OAuthHandler.oauth = oauth_from_env(store, os.environ)
     OAuthHandler.skill = AlexaSkill.from_store(store)
     server = ThreadingHTTPServer(("0.0.0.0", 8001), OAuthHandler)
     print("OAuth/Alexa server disponible sur http://0.0.0.0:8001")
+    if OAuthHandler.oauth is None:
+        print(
+            "Liaison de compte Alexa non configurée : renseignez ALEXA_OAUTH_CLIENT_ID "
+            "et ALEXA_VENDOR_ID (ou ALEXA_OAUTH_REDIRECT_URI), puis redémarrez."
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

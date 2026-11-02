@@ -5,23 +5,35 @@ exposer de secret.
 
 ## 1. Variables d'environnement
 
-Copiez `.env.example` vers `.env` en développement :
+Sur un serveur, `./install.sh` crée et remplit `.env` (voir le
+[README](./README.md)). En développement, copiez `.env.example` vers `.env` :
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
 Ne mettez jamais un vrai mot de passe dans Git. Le fichier `.env` est ignoré
-par Git. Les variables reconnues par le client actuel sont :
+par Git. Les variables reconnues sont :
 
 | Variable | Obligatoire | Description |
 | --- | --- | --- |
+| `DOMAIN` | Serveur | Nom de domaine public utilisé par Caddy pour le certificat HTTPS. |
+| `ECO_TO_ALEXA_SECRET_KEY` | Oui | Clé Fernet de chiffrement des identifiants École Directe. |
+| `ECO_TO_ALEXA_DB` | Non | Chemin de la base SQLite de la fondation comptes. |
+| `ECO_TO_ALEXA_SECURE_COOKIES` | Non | `1` derrière HTTPS (cookies `Secure`), `0` en HTTP local. |
+| `ALEXA_OAUTH_CLIENT_ID` | Pour OAuth | Identifiant client déclaré dans Alexa (`ec-to-alexa` par défaut). |
+| `ALEXA_OAUTH_CLIENT_SECRET` | Recommandé | Secret client déclaré dans Alexa, vérifié sur `/oauth/token`. |
+| `ALEXA_VENDOR_ID` | Pour OAuth | Vendor ID Amazon ; autorise les trois URL de redirection Alexa (Europe, Amérique, Japon). |
+| `ALEXA_OAUTH_REDIRECT_URI` | Non | URL de redirection supplémentaires, séparées par des virgules. |
+| `ALEXA_SKILL_ID` | Recommandé | Identifiant `amzn1.ask.skill...` ; les requêtes d'une autre skill sont refusées. |
+| `EXPOSE_ADDR` | Non | Adresse d'écoute des ports 8000/8001 sur l'hôte (`127.0.0.1` par défaut). |
 | `ECOLE_DIRECTE_IDENTIFIANT` | Non | Identifiant utilisé par le script CLI. |
 | `ECOLE_DIRECTE_MOT_DE_PASSE` | Non | Mot de passe utilisé par le script CLI. |
-| `ECO_TO_ALEXA_DB` | Non | Chemin de la base SQLite de la fondation comptes. |
-| `ALEXA_OAUTH_CLIENT_ID` | Pour OAuth | Identifiant client déclaré dans Alexa. |
-| `ALEXA_OAUTH_REDIRECT_URI` | Pour OAuth | URI HTTPS autorisée par Alexa, exactement à l'identique. |
-| `ALEXA_SKILL_ID` | Recommandé | Identifiant `amzn1.ask.skill...` ; les requêtes d'une autre skill sont refusées. |
+
+Tant que `ALEXA_OAUTH_CLIENT_ID` et `ALEXA_VENDOR_ID` (ou
+`ALEXA_OAUTH_REDIRECT_URI`) ne sont pas renseignés, `oauth_server.py` démarre
+quand même : le webhook `/alexa` répond, et les routes `/oauth/*` renvoient
+`503 oauth_not_configured`.
 
 Générez une clé Fernet une seule fois et stockez-la uniquement dans `.env` ou
 dans le gestionnaire de secrets du serveur :
@@ -102,36 +114,17 @@ scolaire ».
 | « mes absences » | `GetAbsencesIntent` | Absences, retards, nombre non justifié, le plus récent. |
 | « mes messages » | `GetMessagesIntent` | Nouveaux messages avec expéditeur et objet. |
 
-1. Dans la [console Alexa Developer](https://developer.amazon.com/alexa/console/ask),
-   cliquez sur **Create Skill**, nom « Mon Carnet Scolaire », langue
-   **French (FR)**, type **Custom**, hébergement **Provision your own**.
-2. Onglet **Build → Interaction Model → JSON Editor** : collez le contenu de
-   `skill-package/interactionModels/custom/fr-FR.json`, puis **Save** et
-   **Build skill**.
-3. **Build → Endpoint** : choisissez **HTTPS**, URL
-   `https://<votre-domaine>/alexa`, certificat « My development endpoint has a
-   certificate from a trusted certificate authority ». Alexa n'accepte pas
-   `127.0.0.1` : utilisez le domaine du `Caddyfile` ou un tunnel HTTPS
-   (Cloudflare Tunnel, ngrok) vers le port 8001.
-4. Copiez l'**identifiant de la skill** (`amzn1.ask.skill...`) dans
-   `ALEXA_SKILL_ID` : le webhook refuse les requêtes d'une autre skill et
-   celles de plus de 150 secondes.
-5. **Build → Account Linking** : activez-le, type **Auth Code Grant** :
-   - Authorization URI : `https://<votre-domaine>/oauth/authorize`
-   - Access Token URI : `https://<votre-domaine>/oauth/token`
-   - Client ID : la valeur choisie pour `ALEXA_OAUTH_CLIENT_ID`
-   - Client Secret : une valeur quelconque (non vérifiée par cette version)
-   - Authentication Scheme : **Credentials in request body**
-   - Scope : `ecole`
-   Copiez l'une des **Alexa Redirect URLs** affichées en bas de page
-   (`https://pitangui.amazon.com/api/skill/link/...` ou
-   `https://layla.amazon.com/...`) dans `ALEXA_OAUTH_REDIRECT_URI`, puis
-   redémarrez `oauth_server.py`.
-6. Créez votre compte et connectez École Directe sur `account_server.py`,
-   puis dans l'application Alexa : **Skills → Vos skills → Développement →
-   Mon Carnet Scolaire → Activer**, et connectez-vous avec ce compte.
-7. Onglet **Test** de la console (mode Development) : tapez « ouvre mon
-   carnet scolaire » puis « mes devoirs pour demain ».
+La création de la skill dans la console Amazon, l'Account Linking et
+l'activation dans l'application Alexa sont décrits pas à pas dans le
+[README](./README.md) (étapes 4 à 6). `./install.sh` affiche les valeurs exactes
+à saisir (URL, Client ID, Client Secret) et enregistre ensuite
+`ALEXA_SKILL_ID` et `ALEXA_VENDOR_ID`.
+
+Le point de terminaison `/oauth/token` accepte les identifiants client en
+HTTP Basic (recommandé par Amazon) ou dans le corps de la requête, et vérifie
+`ALEXA_OAUTH_CLIENT_SECRET` lorsqu'il est défini. Le Vendor ID suffit pour
+autoriser les trois URL de redirection d'Amazon, quelle que soit la région du
+compte Alexa.
 
 Alexa envoie le jeton OAuth dans le corps de la requête
 (`context.System.user.accessToken`) : le webhook le lit là, et répond avec

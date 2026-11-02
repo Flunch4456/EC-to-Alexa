@@ -103,6 +103,32 @@ class OAuthAccountLinkingTests(unittest.TestCase):
                 oauth.token(code, "alexa-client", "https://example.test/oauth/callback")
             store.close()
 
+    def test_each_amazon_redirect_uri_is_accepted_and_bound_to_its_code(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as tmp:
+            store = AccountStore(tmp.name)
+            store.register("a@example.test", "a" * 12)
+            europe = "https://layla.amazon.com/api/skill/link/M2TEST"
+            usa = "https://pitangui.amazon.com/api/skill/link/M2TEST"
+            oauth = OAuthAccountLinking(store, "alexa-client", [usa, europe], "secret")
+            code = oauth.authorize("a@example.test", "a" * 12, europe)
+            with self.assertRaises(PermissionError):
+                oauth.token(code, "alexa-client", usa, "secret")
+            self.assertIn("access_token", oauth.token(code, "alexa-client", europe, "secret"))
+            with self.assertRaises(PermissionError):
+                oauth.authorize("a@example.test", "a" * 12, "https://evil.test/cb")
+            store.close()
+
+    def test_client_secret_is_required_when_configured(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as tmp:
+            store = AccountStore(tmp.name)
+            store.register("a@example.test", "a" * 12)
+            uri = "https://layla.amazon.com/api/skill/link/M2TEST"
+            oauth = OAuthAccountLinking(store, "alexa-client", uri, "secret")
+            code = oauth.authorize("a@example.test", "a" * 12)
+            with self.assertRaises(PermissionError):
+                oauth.token(code, "alexa-client", uri, "mauvais")
+            store.close()
+
     def test_oauth_rejects_non_https_redirect_uri(self):
         with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as tmp:
             store = AccountStore(tmp.name)

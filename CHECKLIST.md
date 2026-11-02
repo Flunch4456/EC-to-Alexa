@@ -45,6 +45,11 @@ déploiement.
 - [x] Modèle vocal fr-FR et manifeste dans [`skill-package/`](./skill-package).
 - [x] Webhook `/alexa` : jeton lu dans le corps de la requête, carte
   LinkAccount, LaunchRequest, vérification `ALEXA_SKILL_ID` et horodatage.
+- [x] Installation en une commande : `install.sh` (Docker, `.env`, secrets,
+  Caddy HTTPS intégré au compose, valeurs pour la console Alexa).
+- [x] Account Linking : trois URL de redirection Amazon via `ALEXA_VENDOR_ID`,
+  secret client vérifié (HTTP Basic ou corps), démarrage sans configuration
+  Alexa.
 - [ ] Vérifier la signature des requêtes Amazon avant publication publique.
 - [x] Brancher le healthcheck sur le processus web principal.
 - [x] Ajouter une configuration reverse proxy avec en-têtes de sécurité,
