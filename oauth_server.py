@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Mapping
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
@@ -25,6 +26,11 @@ from application import (
 import ui
 
 RATE_LIMITER = SharedRateLimiter()
+
+
+def log_event(message: str) -> None:
+    """Journal court sur stderr (docker compose logs oauth) : jamais de jeton ni de donnée scolaire."""
+    print(f"[ec-to-alexa] {message}", file=sys.stderr, flush=True)
 
 # Hôtes de redirection Account Linking d'Amazon (Europe, Amérique, Japon).
 ALEXA_LINK_HOSTS = ("layla.amazon.com", "pitangui.amazon.com", "alexa.amazon.co.jp")
@@ -132,12 +138,18 @@ class OAuthHandler(BaseHTTPRequestHandler):
                 self._revoke(self._form())
             else:
                 self._send_json(404, {"error": "not_found"})
-        except AlexaVerificationError:
+        except AlexaVerificationError as error:
+            log_event(f"/alexa refusée : {error}")
             self._send_json(400, {"error": "invalid_alexa_request"})
-        except PermissionError:
+        except PermissionError as error:
+            log_event(f"{parsed.path} refusée : {type(error).__name__}")
             self._send_json(400, {"error": "invalid_grant"})
-        except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            log_event(f"{parsed.path} requête invalide : {error}")
             self._send_json(400, {"error": "invalid_request"})
+        except Exception as error:  # noqa: BLE001 - Alexa doit toujours recevoir une réponse
+            log_event(f"{parsed.path} erreur interne : {type(error).__name__}: {error}")
+            self._send_json(500, {"error": "server_error"})
 
     # -- OAuth ------------------------------------------------------------
     def _authorize(self, fields: dict[str, str]) -> None:
@@ -162,6 +174,7 @@ class OAuthHandler(BaseHTTPRequestHandler):
                 401, self._login_page(params, "E-mail ou mot de passe incorrect.")
             )
             return
+        log_event("liaison Alexa : connexion acceptée, code envoyé à Amazon")
         query = urlencode({"code": code, "state": params["state"]})
         self.send_response(302)
         self.send_header("Location", f"{params['redirect_uri']}?{query}")
@@ -181,6 +194,9 @@ class OAuthHandler(BaseHTTPRequestHandler):
             fields.get("redirect_uri", ""),
             client_secret,
         )
+        user_id = self.oauth.store.user_for_token(result["access_token"], "alexa_tokens")
+        self.oauth.store.audit(user_id, "alexa_linked")
+        log_event(f"liaison Alexa enregistrée pour le compte interne {user_id}")
         self._send_json(200, result)
 
     def _client_credentials(self, fields: dict[str, str]) -> tuple[str, str]:
@@ -228,6 +244,9 @@ class OAuthHandler(BaseHTTPRequestHandler):
             raise ValueError("corps Alexa invalide")
         self.verifier.verify(self.headers, body, envelope)
         token = alexa_access_token(envelope)
+        request = envelope.get("request") or {}
+        name = (request.get("intent") or {}).get("name") or request.get("type")
+        log_event(f"/alexa acceptée : {name} ({'compte lié' if token else 'sans liaison'})")
         self._send_json(200, self.skill.handle(token or None, envelope))
 
     # -- Rendu ------------------------------------------------------------
