@@ -37,6 +37,26 @@ compte.
 | « … mes notes » | Les dernières notes. |
 | « … mes absences » | Absences, retards et ce qui n'est pas justifié. |
 | « … mes messages » | Les nouveaux messages, avec l'expéditeur et l'objet. |
+| « aide » | La liste des questions possibles. |
+| « stop », « annuler » | « À bientôt. » |
+
+Les phrases sont reconnues sous plusieurs formes (« j'ai quoi après », « le
+cahier de texte pour lundi », « à quelle heure je commence demain »…) : la
+liste complète est dans
+[`skill-package/interactionModels/custom/fr-FR.json`](./skill-package/interactionModels/custom/fr-FR.json).
+Le nom d'invocation est **« mon carnet scolaire »** ; « aujourd'hui » et
+« demain » sont calculés à l'heure de Paris (`ECO_TO_ALEXA_TIMEZONE`).
+
+Cas particuliers :
+
+| Situation | Ce que fait Alexa |
+| --- | --- |
+| Compte Amazon pas encore lié | Elle demande de lier le compte sur le site EC to Alexa et envoie une carte avec l'adresse du site dans l'application Alexa. |
+| École Directe pas connecté sur le site | Elle demande de le connecter depuis le site. |
+| École Directe repose une question de sécurité **déjà connue** | Elle y répond toute seule et donne la réponse demandée, sans rien demander à l'élève. |
+| École Directe pose une question de sécurité **nouvelle** | Elle demande d'aller y répondre une fois sur le site, puis de redemander. |
+| École Directe ne répond pas | Elle le dit, et propose de reconnecter le compte sur le site si le problème dure. |
+| Phrase non comprise | « Je n'ai pas compris », puis l'aide. |
 
 Les intitulés École Directe sont reformulés pour être lus à voix haute :
 « Prevent.-sante-env. » devient « Prévention santé environnement », et
@@ -62,9 +82,35 @@ Chaque élève utilise le site du serveur (par exemple
    associé, la date de liaison et la dernière demande. C'est ce qui permet de
    savoir quel compte Amazon lit quel École Directe.
 
-Le site propose aussi **« Essayer sans enceinte »**, qui affiche la réponse
-qu'Alexa donnerait avec les vraies données, ainsi que l'export des données
-du compte, la révocation d'Alexa et la suppression du compte.
+Le site propose aussi :
+
+- **« Essayer sans enceinte »** : affiche la réponse qu'Alexa donnerait, avec
+  les vraies données, pour chaque type de question ;
+- **« Répondre à la question de sécurité »** : apparaît quand Alexa a
+  rencontré une question qu'elle ne connaissait pas ;
+- **« Oublier ces réponses »** : efface les réponses de sécurité mémorisées ;
+- **« Révoquer l'accès d'Alexa »** et **« Déconnecter École Directe »** ;
+- l'**export** des données du compte (fichier JSON) et la **suppression** du
+  compte, qui efface tout.
+
+## Données conservées
+
+| Donnée | Forme dans la base |
+| --- | --- |
+| E-mail du compte EC-to-Alexa | en clair (identifiant de connexion) |
+| Mot de passe du site | haché (PBKDF2-SHA256, sel aléatoire) |
+| Identifiant et mot de passe École Directe, appareil mémorisé (UUID, `cn`/`cv`) | chiffrés (Fernet) |
+| Réponses aux questions de sécurité École Directe | hachées (HMAC-SHA256 avec clé secrète) |
+| Identifiant élève École Directe | en clair (affiché sur le tableau de bord) |
+| Jetons de session, codes OAuth, jetons Alexa, jetons CSRF | empreinte SHA-256 seulement |
+| Compte Alexa lié (`amzn1.ask.account…`), date de liaison et de dernière demande | en clair |
+| Journal d'audit (création de compte, liaisons, QCM rempli automatiquement…) | type d'événement et date, sans contenu |
+
+Les données scolaires (emploi du temps, notes, devoirs, messages) ne sont
+**jamais enregistrées** : elles sont lues à la demande auprès d'École Directe.
+La clé de chiffrement et de hachage (`ECO_TO_ALEXA_SECRET_KEY`) est dans
+`.env`, pas dans la base. Une sauvegarde de la base est faite à chaque mise à
+jour (`update.sh`, dossier `backups/`).
 
 ## Architecture
 
@@ -97,9 +143,17 @@ du compte, la révocation d'Alexa et la suppression du compte.
 | `ecole_directe.py` | Client de l'API École Directe (QCM, appareil mémorisé). |
 | `ui.py` | Gabarit HTML et feuille de style du site (sans JavaScript). |
 | `skill-package/` | Manifeste et modèle vocal fr-FR de la skill. |
-| `install.sh`, `update.sh` | Installation et mise à jour du serveur. |
+| `install.sh` | Installation (Docker, secrets, certificat interne, questions sur la skill) ; relançable sans risque. |
+| `update.sh` | Mise à jour : sauvegarde de la base, `git pull`, tests, redémarrage. |
+| `.env.example` | Modèle de configuration (le vrai `.env` n'est jamais commité). |
+| `test_*.py` | Tests automatiques (site, OAuth, vérification Alexa, phrases, client École Directe, sécurité). |
+| `CHECKLIST.md` | Suivi des fonctionnalités. |
 | `docker-compose.yml`, `Caddyfile`, `Caddyfile.router` | Déploiement Docker : Caddy HTTPS intégré, ou routeur interne derrière un proxy existant. |
 | `web.py` | Outil local de test de l'API École Directe (réponses brutes). |
+
+Technologies : Python 3.12 (serveurs HTTP de la bibliothèque standard, sans
+framework), SQLite, `cryptography`, `certifi`, `tzdata`, Docker Compose et
+Caddy. Le site n'utilise aucun JavaScript.
 
 ## Sécurité
 
@@ -128,6 +182,26 @@ du compte, la révocation d'Alexa et la suppression du compte.
 - **Réseau** : seuls les ports 80 et 443 du proxy sont exposés à Internet.
   Le trajet proxy → serveur peut rester chiffré (routeur HTTPS interne).
 
+## Journaux
+
+Le service `oauth` écrit une ligne `[ec-to-alexa] …` pour chaque requête
+Alexa (acceptée, ou refusée avec la raison) et pour chaque liaison de compte,
+sans jeton, mot de passe ni donnée scolaire. Voir le guide
+`installation-serveur` pour les lire et pour le dépannage.
+
+## Limites connues
+
+- Tant que la skill n'est pas publiée (mode **Development**), elle ne marche
+  que sur les appareils du compte Amazon développeur et des testeurs bêta
+  invités.
+- Français (France) uniquement.
+- L'API d'École Directe n'est pas officielle : si École Directe la modifie, il
+  peut falloir mettre à jour `ecole_directe.py`.
+- Pensé pour un **compte élève** École Directe (un compte parent n'utilise
+  que le premier profil renvoyé).
+- Alexa attend une réponse en moins de 8 secondes : si École Directe est très
+  lente, Alexa dit qu'elle n'arrive pas à la joindre.
+
 EC-to-Alexa n'est affilié ni à École Directe ni à Amazon. Il ne contourne
 aucune protection : chaque réponse au QCM d'École Directe est d'abord donnée
 par l'élève, le serveur ne fait que la rejouer quand la même question revient.
@@ -141,7 +215,8 @@ python -m venv .venv
 ```
 
 Les tests n'effectuent aucun appel réseau : École Directe et Amazon sont
-simulés. Pour lancer le site en local, mettez `ECO_TO_ALEXA_SECURE_COOKIES=0`
+simulés. Ils sont aussi lancés par `update.sh` avant chaque redémarrage du
+serveur. Pour lancer le site en local, mettez `ECO_TO_ALEXA_SECURE_COOKIES=0`
 et une clé `ECO_TO_ALEXA_SECRET_KEY` dans `.env`, puis lancez
 `python account_server.py` (http://127.0.0.1:8000).
 
