@@ -3,7 +3,7 @@ services:
     build: .
     ports:
       # 127.0.0.1 par défaut : l'accès public passe par Caddy en HTTPS.
-      - "${EXPOSE_ADDR:-127.0.0.1}:8000:8000"
+      - "${EXPOSE_ADDR:-127.0.0.1}:${WEB_PORT:-8000}:8000"
     env_file:
       - .env
     environment:
@@ -22,7 +22,7 @@ services:
     build: .
     command: ["python", "oauth_server.py"]
     ports:
-      - "${EXPOSE_ADDR:-127.0.0.1}:8001:8001"
+      - "${EXPOSE_ADDR:-127.0.0.1}:${OAUTH_PORT:-8001}:8001"
     env_file:
       - .env
     environment:
@@ -39,7 +39,7 @@ services:
       retries: 3
   caddy:
     # Reverse proxy HTTPS intégré. Si un autre proxy (Zoraxy, Nginx Proxy
-    # Manager…) occupe déjà 80/443, mettez COMPOSE_PROFILES= (vide) dans .env.
+    # Manager…) occupe déjà 80/443, utilisez COMPOSE_PROFILES=router.
     profiles: ["caddy"]
     image: caddy:2
     ports:
@@ -52,6 +52,20 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    depends_on:
+      - web
+      - oauth
+    restart: unless-stopped
+  router:
+    # Routeur HTTP interne derrière un proxy existant qui gère déjà HTTPS :
+    # une seule règle vers EXPOSE_ADDR:ROUTER_PORT suffit. Zoraxy retire le
+    # préfixe des répertoires virtuels, ce qui casserait /oauth/* et /alexa.
+    profiles: ["router"]
+    image: caddy:2
+    ports:
+      - "${EXPOSE_ADDR:-127.0.0.1}:${ROUTER_PORT:-8080}:8080"
+    volumes:
+      - ./Caddyfile.router:/etc/caddy/Caddyfile:ro
     depends_on:
       - web
       - oauth

@@ -43,15 +43,6 @@ if ! docker info >/dev/null 2>&1; then
 fi
 $DOCKER compose version >/dev/null 2>&1 || die "Le plugin « docker compose » est introuvable."
 
-# Caddy intégré sauf si .env contient explicitement « COMPOSE_PROFILES= » (vide).
-USES_CADDY=1
-if [ -f .env ] && grep -qE '^COMPOSE_PROFILES=$' .env; then
-	USES_CADDY=""
-fi
-if [ -n "$USES_CADDY" ] && systemctl is-active --quiet caddy 2>/dev/null; then
-	die "Un Caddy installé hors Docker occupe déjà les ports 80/443. Arrêtez-le avec « sudo systemctl disable --now caddy », puis relancez ./install.sh."
-fi
-
 # --- 2. Fichier .env --------------------------------------------------------
 if [ ! -f .env ]; then
 	cp .env.example .env
@@ -82,6 +73,20 @@ ask() {
 }
 default_env() { [ -n "$(get_env "$1")" ] || set_env "$1" "$2"; }
 
+# Mode proxy : « caddy » (HTTPS intégré), « router » (derrière Zoraxy…) ou vide.
+# COMPOSE_PROFILES=router ./install.sh l'enregistre dans .env pour update.sh.
+if [ -n "${COMPOSE_PROFILES+x}" ]; then
+	set_env COMPOSE_PROFILES "$COMPOSE_PROFILES"
+fi
+grep -qE '^COMPOSE_PROFILES=' .env || set_env COMPOSE_PROFILES caddy
+export COMPOSE_PROFILES="$(get_env COMPOSE_PROFILES)"
+has_profile() { [[ ",$COMPOSE_PROFILES," == *",$1,"* ]]; }
+USES_CADDY=""; has_profile caddy && USES_CADDY=1
+USES_ROUTER=""; has_profile router && USES_ROUTER=1
+if [ -n "$USES_CADDY" ] && systemctl is-active --quiet caddy 2>/dev/null; then
+	die "Un Caddy installé hors Docker occupe déjà les ports 80/443. Arrêtez-le avec « sudo systemctl disable --now caddy », ou utilisez COMPOSE_PROFILES=router derrière votre proxy, puis relancez ./install.sh."
+fi
+
 info "Configuration (Entrée = garder la valeur entre crochets)"
 ask DOMAIN "Nom de domaine du serveur (ex. ecole.mondomaine.fr)"
 DOMAIN_VALUE="$(get_env DOMAIN)"
@@ -93,7 +98,9 @@ default_env ECO_TO_ALEXA_DB "/data/ec_to_alexa.sqlite3"
 default_env ECO_TO_ALEXA_SECURE_COOKIES "1"
 default_env EXPOSE_ADDR "127.0.0.1"
 default_env ALEXA_OAUTH_CLIENT_ID "ec-to-alexa"
-grep -qE '^COMPOSE_PROFILES=' .env || set_env COMPOSE_PROFILES caddy
+default_env WEB_PORT "8000"
+default_env OAUTH_PORT "8001"
+default_env ROUTER_PORT "8080"
 # Les affectations propagent l'échec d'openssl à set -e (un argument ne le ferait pas).
 if [ -z "$(get_env ECO_TO_ALEXA_SECRET_KEY)" ]; then
 	# Clé Fernet : 32 octets en base64 url-safe, avec le « = » final obligatoire.
@@ -137,12 +144,17 @@ $DOCKER compose build --pull
 info "Exécution des tests"
 $DOCKER compose run --rm --no-deps web python -m unittest discover -p "test_*.py"
 info "Démarrage des services"
+# Un proxy d'un autre mode resterait lancé (et pourrait boucler derrière Zoraxy).
+[ -n "$USES_CADDY" ] || $DOCKER compose --profile caddy rm --stop --force caddy >/dev/null 2>&1 || true
+[ -n "$USES_ROUTER" ] || $DOCKER compose --profile router rm --stop --force router >/dev/null 2>&1 || true
 $DOCKER compose up -d --remove-orphans
 
 info "Vérification"
 CHECK_HOST="$(get_env EXPOSE_ADDR)"
 case "$CHECK_HOST" in ""|0.0.0.0) CHECK_HOST=127.0.0.1 ;; esac
-for port in 8000 8001; do
+CHECK_PORTS="$(get_env WEB_PORT) $(get_env OAUTH_PORT)"
+[ -z "$USES_ROUTER" ] || CHECK_PORTS="$CHECK_PORTS $(get_env ROUTER_PORT)"
+for port in $CHECK_PORTS; do
 	ok=""
 	for _ in $(seq 1 15); do
 		if curl -fsS --max-time 3 "http://$CHECK_HOST:$port/healthz" >/dev/null 2>&1; then ok=1; break; fi
@@ -159,7 +171,11 @@ fi
 # --- 5. Récapitulatif -------------------------------------------------------
 cat <<EOF
 
-$( [ -n "$USES_CADDY" ] || printf '%s\n' "Reverse proxy externe : envoyez https://$DOMAIN_VALUE/oauth/* et /alexa vers $CHECK_HOST:8001, tout le reste vers $CHECK_HOST:8000." )
+$( if [ -n "$USES_ROUTER" ]; then
+	printf '%s\n' "Reverse proxy externe (Zoraxy…) : UNE règle pour $DOMAIN_VALUE vers http://$CHECK_HOST:$(get_env ROUTER_PORT), sans répertoire virtuel, certificat Let's Encrypt."
+elif [ -z "$USES_CADDY" ]; then
+	printf '%s\n' "Reverse proxy externe : https://$DOMAIN_VALUE/oauth/* et /alexa vers $CHECK_HOST:$(get_env OAUTH_PORT) SANS retirer le préfixe, le reste vers $CHECK_HOST:$(get_env WEB_PORT). Avec Zoraxy, utilisez plutôt COMPOSE_PROFILES=router."
+fi )
 ==================== Valeurs pour la console Alexa ====================
 Endpoint (Build > Endpoint > HTTPS)
   URL            : https://$DOMAIN_VALUE/alexa

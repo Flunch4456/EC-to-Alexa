@@ -18,8 +18,9 @@ ce qui se passe **sur le serveur** :
   identifiants École Directe, secret OAuth) ;
 - démarre trois conteneurs : le site de comptes (`web`), la liaison Alexa et
   le webhook de la skill (`oauth`), et **Caddy**, qui obtient tout seul le
-  certificat HTTPS exigé par Alexa (désactivable si tu as déjà un reverse
-  proxy comme Zoraxy, voir [Dépannage](#dépannage)) ;
+  certificat HTTPS exigé par Alexa (si tu as déjà un reverse proxy comme
+  Zoraxy, le mode `router` le remplace par un simple routeur interne, voir
+  [Dépannage](#dépannage)) ;
 - ouvre les ports 80/443 dans `ufw` s'il est actif ;
 - lance les tests, puis affiche **les valeurs exactes à coller dans la console
   Amazon**.
@@ -211,7 +212,9 @@ Les journaux se consultent avec `docker compose logs --tail=100 web oauth caddy`
 | Page de liaison : `invalid_request` | Le Client ID de la console n'est pas `ec-to-alexa`, ou le Vendor ID saisi est faux. |
 | « Il y a eu un problème avec la réponse de la skill » | L'identifiant de skill dans `.env` ne correspond pas, ou le serveur est arrêté. Relance `./install.sh`. |
 | « Je n'arrive pas à joindre École Directe » | Mot de passe École Directe changé ou question de sécurité demandée : reconnecte École Directe sur `https://ton-domaine/`. |
-| J'ai déjà un reverse proxy (Zoraxy, Nginx Proxy Manager…) sur 80/443 | Dans `.env`, mets `COMPOSE_PROFILES=` (vide) pour ne pas lancer Caddy, et `EXPOSE_ADDR` à l'adresse que ton proxy peut joindre (`127.0.0.1` s'il est sur la même machine, sinon l'IP locale du serveur). Dans le proxy : `https://ton-domaine/oauth/*` et `https://ton-domaine/alexa` → port **8001**, tout le reste → port **8000**, avec un certificat Let's Encrypt. Relance `./install.sh`. |
+| J'ai déjà un reverse proxy (Zoraxy, Nginx Proxy Manager…) sur 80/443 | Lance `COMPOSE_PROFILES=router ./install.sh` : Caddy n'obtient pas de certificat, il sert seulement de routeur HTTP sur `127.0.0.1:8080`. Dans ton proxy, crée **une seule règle** pour ton domaine vers `http://127.0.0.1:8080`, **sans répertoire virtuel** (Zoraxy retire le préfixe des répertoires virtuels : `/oauth/token` arriverait en `/token`), avec un certificat Let's Encrypt. Si le proxy est sur une autre machine, mets `EXPOSE_ADDR` à l'IP locale du serveur. |
+| Le site boucle sur une redirection (`308`, « trop de redirections ») derrière Zoraxy | Le Caddy HTTPS intégré tourne derrière ton proxy. Passe en mode `router` (ligne ci-dessus) : `install.sh` arrête alors ce Caddy. |
+| Conflit sur le port 8000 avec Zoraxy | L'interface d'administration de Zoraxy utilise 8000 par défaut. Mets `WEB_PORT=18000` dans `.env` et relance `./install.sh` ; en mode `router`, rien d'autre ne change. |
 | Accéder au site en HTTP depuis le réseau local | Dans `.env`, mets `EXPOSE_ADDR=0.0.0.0` et `ECO_TO_ALEXA_SECURE_COOKIES=0`, puis `docker compose up -d`. Ports 8000/8001 en clair : à éviter sur un réseau partagé. |
 
 ## Sécurité

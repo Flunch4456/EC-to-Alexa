@@ -2,6 +2,7 @@
 # Fichiers exécutés ou lus sous Linux : toujours en fins de ligne LF.
 *.sh text eol=lf
 Caddyfile text eol=lf
+Caddyfile.router text eol=lf
 Dockerfile text eol=lf
 docker-compose.yml text eol=lf
 .env.example text eol=lf

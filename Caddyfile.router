@@ -1,0 +1,19 @@
+# Utilisé par le service « router » de docker-compose.yml (COMPOSE_PROFILES=router).
+# Le proxy existant (Zoraxy…) termine HTTPS et envoie tout le domaine ici, en
+# HTTP ; ce routeur répartit les chemins sans les modifier.
+{
+	auto_https off
+	servers {
+		# Conserve l'IP réelle transmise par le proxy dans X-Forwarded-For.
+		trusted_proxies static private_ranges
+	}
+}
+
+:8080 {
+	request_body {
+		max_size 64KB
+	}
+	reverse_proxy /oauth/* oauth:8001
+	reverse_proxy /alexa oauth:8001
+	reverse_proxy web:8000
+}

@@ -57,6 +57,8 @@ déploiement.
 - [x] Interface web : accueil, tableau de bord en trois étapes, simulateur
   « Essayer sans enceinte », révocation Alexa, page de liaison OAuth.
 - [x] Caddy optionnel (`COMPOSE_PROFILES`) pour un reverse proxy existant.
+- [x] Profil `router` derrière Zoraxy : une seule règle vers `127.0.0.1:8080`
+  (Zoraxy retire le préfixe des répertoires virtuels), ports réglables.
 - [x] Skill « Mon Carnet Scolaire » créée dans la console Amazon (fr-FR,
   Custom, Provision your own) et modèle vocal importé.
 - [ ] Console Amazon : endpoint HTTPS et Account Linking, une fois le domaine

@@ -176,25 +176,28 @@ libérer les ports : `sudo systemctl disable --now caddy`.
 
 #### Avec un reverse proxy existant (Zoraxy, Nginx Proxy Manager…)
 
-Si les ports 80/443 sont déjà utilisés par un autre proxy, désactivez Caddy
-dans `.env` et exposez les deux services à une adresse que le proxy peut
-joindre :
+Si les ports 80/443 sont déjà utilisés par un autre proxy, utilisez le
+profil `router` : Caddy ne gère plus HTTPS et sert seulement de routeur HTTP
+interne sur `EXPOSE_ADDR:ROUTER_PORT` (`127.0.0.1:8080` par défaut).
 
 ```bash
-COMPOSE_PROFILES=
-EXPOSE_ADDR=127.0.0.1   # ou l'IP locale du serveur si le proxy est sur une autre machine
+COMPOSE_PROFILES=router ./install.sh
 ```
 
-Dans le proxy, pour le domaine public, avec un certificat Let's Encrypt :
+Dans le proxy, créez **une seule règle** pour le domaine public vers
+`http://127.0.0.1:8080`, avec un certificat Let's Encrypt, **sans répertoire
+virtuel**. Zoraxy retire le préfixe d'un répertoire virtuel avant de
+transmettre la requête (`/oauth/token` deviendrait `/token`), ce qui
+casserait la liaison de compte et le webhook ; le routeur interne répartit
+donc lui-même `/oauth/*` et `/alexa` vers le service `oauth`, et le reste
+vers `web`.
 
-| Chemin | Destination |
-| --- | --- |
-| `/oauth/*` et `/alexa` | `http://EXPOSE_ADDR:8001` |
-| tout le reste | `http://EXPOSE_ADDR:8000` |
-
-Le proxy doit transmettre `X-Forwarded-For`. Si l'adresse vue par les
-conteneurs n'est pas dans `172.16.0.0/12`, ajoutez-la à
-`ECO_TO_ALEXA_TRUSTED_PROXIES`. Relancez ensuite `./install.sh`.
+- Proxy sur une autre machine : `EXPOSE_ADDR` = IP locale du serveur, et
+  ajoutez l'IP du proxy à `ECO_TO_ALEXA_TRUSTED_PROXIES`.
+- Conflit de port (l'interface de Zoraxy utilise 8000 par défaut) : changez
+  `WEB_PORT`, `OAUTH_PORT` ou `ROUTER_PORT` dans `.env`.
+- `install.sh` arrête le Caddy HTTPS s'il tournait encore : derrière un autre
+  proxy, il provoquerait une boucle de redirection.
 
 ### 5. Mises à jour, arrêt et sauvegardes
 
