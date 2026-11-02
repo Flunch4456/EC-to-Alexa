@@ -2,3 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+# Certificat interne du routeur (clé privée) : jamais dans Git ni dans l'image.
+router-tls/
+# Sauvegardes de la base créées par update.sh (données personnelles).
+backups/
