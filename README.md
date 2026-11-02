@@ -413,5 +413,6 @@ sans jeton ni donnée scolaire.
 | Le bouton « Lier mon compte Amazon » n'apparaît pas | École Directe pas encore connecté, ou `ALEXA_APP_CLIENT_ID`/`SECRET` vides : relance `./install.sh`. |
 | Conflit sur le port 8000 | Zoraxy sur la même machine : `WEB_PORT=18000` dans `.env`, puis `./install.sh`. |
 | Conteneurs en boucle : « Fernet key must be 32 url-safe base64-encoded bytes » | Clé tronquée dans `.env`. Si aucune liaison n'existe encore : supprime la ligne `ECO_TO_ALEXA_SECRET_KEY=` et relance `./install.sh`. |
-| « Je n'arrive pas à joindre École Directe » | Mot de passe École Directe changé ou QCM demandé : reconnecter École Directe sur le site. |
+| Alexa : « École Directe pose une question de sécurité que je ne connais pas encore » | Normal la première fois pour chaque question : sur le site, bouton « Répondre à la question de sécurité ». La réponse est ensuite mémorisée (hachée) et remplie automatiquement. Événements `qcm_auto_answered` / `qcm_auto_answer_rejected` dans la table `audit_events`. |
+| « Je n'arrive pas à joindre École Directe » | École Directe indisponible ou trop lente, ou mot de passe École Directe changé : déconnecter puis reconnecter École Directe sur le site. |
 | Page vide quelques secondes après une mise à jour | Normal pendant le redémarrage des conteneurs : recharge la page. |
