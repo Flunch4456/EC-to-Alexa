@@ -72,6 +72,18 @@ ask() {
 	set_env "$key" "${answer:-$current}"
 }
 default_env() { [ -n "$(get_env "$1")" ] || set_env "$1" "$2"; }
+# ask_secret CLÉ "question" : saisie masquée ; Entrée garde la valeur actuelle.
+ask_secret() {
+	local key="$1" question="$2" current answer=""
+	current="$(get_env "$key")"
+	if [ -n "${!key:-}" ]; then
+		answer="${!key}"
+	elif [ -t 0 ]; then
+		read -r -s -p "$question${current:+ [déjà renseigné]} : " answer || true
+		echo
+	fi
+	set_env "$key" "${answer:-$current}"
+}
 
 # Mode proxy : « caddy » (HTTPS intégré), « router » (derrière Zoraxy…) ou vide.
 # COMPOSE_PROFILES=router ./install.sh l'enregistre dans .env pour update.sh.
@@ -93,6 +105,10 @@ DOMAIN_VALUE="$(get_env DOMAIN)"
 [ -n "$DOMAIN_VALUE" ] || die "Un nom de domaine est obligatoire : Alexa n'accepte que HTTPS avec un certificat valide."
 ask ALEXA_SKILL_ID "Identifiant de la skill amzn1.ask.skill... (vide si pas encore créée)"
 ask ALEXA_VENDOR_ID "Vendor ID Amazon, ex. M2ABC123DEF (vide si pas encore connu)"
+ask ALEXA_APP_CLIENT_ID "Alexa Client Id pour « Lier mon compte Amazon » (console > Account Linking, vide pour ignorer)"
+if [ -n "$(get_env ALEXA_APP_CLIENT_ID)" ]; then
+	ask_secret ALEXA_APP_CLIENT_SECRET "Alexa Client Secret (bouton SHOW dans la console)"
+fi
 
 default_env ECO_TO_ALEXA_DB "/data/ec_to_alexa.sqlite3"
 default_env ECO_TO_ALEXA_SECURE_COOKIES "1"

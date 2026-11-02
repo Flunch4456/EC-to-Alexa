@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from datetime import datetime
@@ -24,6 +25,7 @@ from application import (
     read_body,
     trusted_client_address,
 )
+from amazon_link import AmazonLinkError, AmazonSkillLinker, pkce_pair
 from ecole_directe import EcoleDirecteClient, EcoleDirecteError
 import ui
 
@@ -36,6 +38,7 @@ FLASH = {
     "ed": "École Directe est connecté. Ton identifiant élève a été vérifié.",
     "ed-off": "École Directe est déconnecté et Alexa n'a plus accès à tes données.",
     "alexa-off": "La liaison Alexa est révoquée. Alexa te demandera de lier ton compte à nouveau.",
+    "amazon": "Ton compte Amazon est lié : la skill Mon Carnet Scolaire est activée sur tes appareils Alexa.",
     "bye": "Session fermée.",
     "deleted": "Ton compte et toutes ses données ont été supprimés.",
 }
@@ -87,10 +90,39 @@ class PendingQcm:
             self._items.pop(self._key(session), None)
 
 
+class PendingAmazon:
+    """Liaisons Amazon en cours (state OAuth → session, compte, vérificateur PKCE), 10 min."""
+
+    TTL = 600
+    MAX = 200
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: dict[str, tuple[float, str, int, str]] = {}
+
+    def put(self, state: str, session: str, user_id: int, verifier: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._items = {k: v for k, v in self._items.items() if v[0] > now}
+            if len(self._items) >= self.MAX:
+                self._items.pop(next(iter(self._items)))
+            self._items[state] = (now + self.TTL, PendingQcm._key(session), user_id, verifier)
+
+    def pop(self, state: str, session: str) -> tuple[int, str] | None:
+        with self._lock:
+            item = self._items.pop(state, None)
+        if not item or item[0] <= time.monotonic() or item[1] != PendingQcm._key(session):
+            return None
+        return item[2], item[3]
+
+
 class AccountHandler(BaseHTTPRequestHandler):
     store: AccountStore
     skill: AlexaSkill
     pending = PendingQcm()
+    linker: AmazonSkillLinker | None = None
+    oauth_client_id: str = ""
+    amazon_pending = PendingAmazon()
 
     # -- Routage ----------------------------------------------------------
     def do_GET(self) -> None:
@@ -115,6 +147,10 @@ class AccountHandler(BaseHTTPRequestHandler):
                 self._send(200, "text/html", self._dashboard(user_id, flash))
         elif path == "/account/export":
             self._export()
+        elif path == "/amazon/link":
+            self._amazon_start(query)
+        elif path == "/amazon/callback":
+            self._amazon_callback(query)
         else:
             self._send(404, "text/html", ui.page("Page introuvable", self._not_found()))
 
@@ -269,6 +305,61 @@ class AccountHandler(BaseHTTPRequestHandler):
         self.store.audit(user_id, "alexa_unlinked")
         self._redirect("/dashboard?ok=alexa-off")
 
+    def _amazon_start(self, query: dict[str, list[str]]) -> None:
+        """Lien « Lier mon compte Amazon » : part vers Login with Amazon (GET + jeton CSRF)."""
+        session = self._cookie("session")
+        user_id = self._user_id()
+        if user_id is None:
+            self._redirect("/")
+            return
+        if not self.store.check_csrf(session, query.get("csrf", [""])[0]):
+            self._send(403, "text/html", self._dashboard(user_id, error="Le lien a expiré. Recommence."))
+            return
+        if self.linker is None or not self.oauth_client_id:
+            self._send(503, "text/html", self._dashboard(
+                user_id, error="La liaison Amazon depuis le site n'est pas encore configurée sur le serveur."))
+            return
+        if not self.store.has_ecole_directe_connection(user_id):
+            self._send(400, "text/html", self._dashboard(
+                user_id, error="Connecte d'abord École Directe (étape 2)."))
+            return
+        state = secrets.token_urlsafe(24)
+        verifier, challenge = pkce_pair()
+        self.amazon_pending.put(state, session, user_id, verifier)
+        self._redirect(self.linker.authorization_url(state, challenge))
+
+    def _amazon_callback(self, query: dict[str, list[str]]) -> None:
+        session = self._cookie("session")
+        user_id = self._user_id()
+        if user_id is None:
+            self._redirect("/")
+            return
+        pending = self.amazon_pending.pop(query.get("state", [""])[0], session)
+        if pending is None or pending[0] != user_id or self.linker is None:
+            self._send(400, "text/html", self._dashboard(
+                user_id, error="La liaison Amazon a expiré ou ne vient pas de cette session. Recommence."))
+            return
+        if query.get("error"):
+            self._send(400, "text/html", self._dashboard(
+                user_id, error="Liaison annulée sur la page Amazon. Tu peux recommencer quand tu veux."))
+            return
+        try:
+            amazon_token = self.linker.exchange_code(query.get("code", [""])[0], pending[1])
+            # Code OAuth à usage unique pour CE compte : Amazon l'échange sur /oauth/token.
+            auth_code = self.store.create_authorization_code(
+                user_id, self.oauth_client_id, self.linker.redirect_uri
+            )
+            result = self.linker.enable_and_link(amazon_token, auth_code)
+        except AmazonLinkError as error:
+            self._send(502, "text/html", self._dashboard(user_id, error=str(error)))
+            return
+        alexa_user = str((result.get("user") or {}).get("id") or "")
+        if alexa_user:
+            self.store.record_amazon_link(user_id, alexa_user, "site")
+        self.store.audit(user_id, "amazon_linked")
+        print(f"[ec-to-alexa] compte Amazon lié depuis le site pour le compte interne {user_id}", flush=True)
+        self._redirect("/dashboard?ok=amazon")
+
     def _simulate(self, user_id: int, session: str, fields: dict[str, str]) -> None:
         choice = next((s for s in SIMULATIONS if s[0] == fields.get("question")), None)
         if choice is None:
@@ -331,6 +422,7 @@ class AccountHandler(BaseHTTPRequestHandler):
         account = self.store.export_account(user_id)
         info = self.store.ecole_directe_info(user_id)
         alexa_links = self.store.alexa_link_count(user_id)
+        amazon = self.store.amazon_link(user_id)
         pending = self.pending.get(session)
 
         # Étape 1 : compte
@@ -375,15 +467,38 @@ class AccountHandler(BaseHTTPRequestHandler):
 
         # Étape 3 : Alexa
         if alexa_links:
+            if amazon:
+                linked = datetime.fromtimestamp(int(amazon["linked_at"])).strftime("%d/%m/%Y à %H:%M")
+                seen = (
+                    datetime.fromtimestamp(int(amazon["last_seen_at"])).strftime("%d/%m/%Y à %H:%M")
+                    if amazon.get("last_seen_at") else "pas encore"
+                )
+                origin = "depuis ce site" if amazon["source"] == "site" else "depuis l'application Alexa"
+                facts = f"""
+  <dl class="facts"><dt>Compte Alexa</dt><dd>…{ui.esc(str(amazon['alexa_user_id'])[-8:])}</dd>
+  <dt>Lié le</dt><dd>{linked} ({origin})</dd>
+  <dt>Dernière demande</dt><dd>{seen}</dd></dl>
+  <p>Toutes les demandes de ce compte Alexa utilisent ton École Directe
+  (identifiant élève {ui.esc((info or {}).get('student_id') or '?')}).</p>"""
+            else:
+                facts = """
+  <p>Le compte Alexa sera identifié ici dès sa première demande.</p>"""
             step_alexa = f"""
-<li class="done"><h2>Alexa <span class="status">liée</span></h2>
+<li class="done"><h2>Alexa <span class="status">liée</span></h2>{facts}
   <p>Essaie maintenant sur ton enceinte :</p>
   <p class="say">Alexa, demande à {ui.INVOCATION} mon prochain cours</p>
   <form method="post" action="/alexa/unlink">{hidden}
     <button class="quiet" type="submit">Révoquer l'accès d'Alexa</button></form></li>"""
         else:
+            link_button = ""
+            if self.linker is not None and info:
+                link_button = f"""
+  <p><a class="button" href="/amazon/link?csrf={csrf}">Lier mon compte Amazon</a></p>
+  <p>Tu te connectes à ton compte Amazon (celui de ton Echo), et la skill est activée et
+  reliée à ce compte EC to Alexa, sans passer par l'application.</p>
+  <p class="aside">Autre possibilité :</p>"""
             step_alexa = f"""
-<li><h2>Alexa <span class="status">à lier</span></h2>
+<li><h2>Alexa <span class="status">à lier</span></h2>{link_button}
   <p>Dans l'application Alexa, ouvre <strong>Plus › Skills et jeux</strong>, cherche
   la skill « Mon Carnet Scolaire » (onglet <em>Vos skills › Développeur</em> tant qu'elle
   n'est pas publiée), puis touche <strong>Activer</strong>. Alexa t'enverra sur une page
@@ -530,6 +645,10 @@ def main() -> None:
     store = AccountStore(os.environ.get("ECO_TO_ALEXA_DB", "ec_to_alexa.sqlite3"), key.encode())
     AccountHandler.store = store
     AccountHandler.skill = AlexaSkill.from_store(store)
+    AccountHandler.linker = AmazonSkillLinker.from_env(os.environ)
+    AccountHandler.oauth_client_id = os.environ.get("ALEXA_OAUTH_CLIENT_ID", "").strip()
+    if AccountHandler.linker is None:
+        print("Liaison Amazon depuis le site désactivée : renseignez ALEXA_APP_CLIENT_ID et ALEXA_APP_CLIENT_SECRET.")
     host = os.environ.get("ECO_TO_ALEXA_HOST", "127.0.0.1")
     port = int(os.environ.get("ECO_TO_ALEXA_ACCOUNT_PORT", "8000"))
     server = ThreadingHTTPServer((host, port), AccountHandler)

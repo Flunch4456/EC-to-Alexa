@@ -26,6 +26,9 @@ par Git. Les variables reconnues sont :
 | `ALEXA_VENDOR_ID` | Pour OAuth | Vendor ID Amazon ; autorise les trois URL de redirection Alexa (Europe, Amérique, Japon). |
 | `ALEXA_OAUTH_REDIRECT_URI` | Non | URL de redirection supplémentaires, séparées par des virgules. |
 | `ALEXA_SKILL_ID` | Recommandé | Identifiant `amzn1.ask.skill...` ; les requêtes d'une autre skill sont refusées. |
+| `ALEXA_APP_CLIENT_ID` | Liaison depuis le site | « Alexa Client Id » (Account Linking, option « from within your application or website »). |
+| `ALEXA_APP_CLIENT_SECRET` | Liaison depuis le site | « Alexa Client Secret » correspondant, hors dépôt. |
+| `ALEXA_SKILL_STAGE` | Non | `development` (défaut) tant que la skill n'est pas publiée, puis `live`. |
 | `EXPOSE_ADDR` | Non | Adresse d'écoute des ports 8000/8001 sur l'hôte (`127.0.0.1` par défaut). |
 | `ECOLE_DIRECTE_IDENTIFIANT` | Non | Identifiant utilisé par le script CLI. |
 | `ECOLE_DIRECTE_MOT_DE_PASSE` | Non | Mot de passe utilisé par le script CLI. |

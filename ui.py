@@ -136,6 +136,17 @@ button {
   cursor: pointer;
 }
 button:hover { background: var(--ink-dark); border-color: var(--ink-dark); }
+a.button {
+  display: inline-block;
+  padding: 8px 20px;
+  border: 1px solid var(--ink);
+  border-radius: 4px;
+  background: var(--ink);
+  color: #fff;
+  font: 600 16px/24px var(--sans);
+  text-decoration: none;
+}
+a.button:hover { background: var(--ink-dark); border-color: var(--ink-dark); color: #fff; }
 button.quiet { background: transparent; color: var(--ink); }
 button.quiet:hover { background: rgba(29,63,175,.08); }
 button.link { padding: 0; border: 0; background: none; color: var(--ink); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }

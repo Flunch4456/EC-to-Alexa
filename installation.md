@@ -431,9 +431,19 @@ curl -s -X POST -H "Content-Type: application/json" -d '{}' https://ec-to-alexa.
 3. Onglet **Test** : **Development**.
 4. Sur `https://ec-to-alexa.nial-tech.com/` : créez votre compte, connectez
    École Directe, essayez une question dans « Essayer sans enceinte ».
-5. Application Alexa → **Skills et jeux** → **Vos skills** → **Développeur**
-   → **Mon Carnet Scolaire** → **Activer**, puis connectez-vous avec le
-   compte EC-to-Alexa. Dites « Alexa, ouvre mon carnet scolaire ».
+5. Liez le compte Amazon, au choix :
+   - **depuis le site** (tableau de bord → **Lier mon compte Amazon**) :
+     nécessite, dans **Account Linking**, l'option **Allow users to link
+     their account to your skill from within your application or website**,
+     l'URL `https://ec-to-alexa.nial-tech.com/amazon/callback` dans **Your
+     Redirect URLs**, puis `ALEXA_APP_CLIENT_ID` / `ALEXA_APP_CLIENT_SECRET`
+     (« Alexa Client Id » / « Alexa Client Secret ») saisis via `./install.sh` ;
+   - **depuis l'application Alexa** → **Skills et jeux** → **Vos skills** →
+     **Développeur** → **Mon Carnet Scolaire** → **Activer**, puis connexion
+     avec le compte EC-to-Alexa.
+
+   Dites ensuite « Alexa, ouvre mon carnet scolaire ». Le tableau de bord
+   affiche le compte Alexa associé et la date de sa dernière demande.
 
 ## Vérifications après installation
 

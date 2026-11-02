@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from alexa_verify import AlexaRequestVerifier, AlexaVerificationError
+from amazon_link import public_base_url
 from application import (
     AccountStore,
     AlexaSkill,
@@ -47,6 +48,10 @@ def redirect_uris_from_env(env: Mapping[str, str]) -> list[str]:
     vendor_id = env.get("ALEXA_VENDOR_ID", "").strip()
     if vendor_id:
         uris += [f"https://{host}/api/skill/link/{vendor_id}" for host in ALEXA_LINK_HOSTS]
+    # Liaison lancée depuis le site : Amazon échange notre code avec cette URL.
+    base = public_base_url(env)
+    if base and env.get("ALEXA_APP_CLIENT_ID", "").strip():
+        uris.append(base + "/amazon/callback")
     return list(dict.fromkeys(uris))
 
 

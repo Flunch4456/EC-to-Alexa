@@ -160,6 +160,15 @@ class AccountStore:
                 token_hash TEXT NOT NULL,
                 expires_at INTEGER NOT NULL
             );
+            -- Compte Alexa (identifiant amzn1.ask.account… propre à la skill)
+            -- associé à un compte EC-to-Alexa, donc à sa liaison École Directe.
+            CREATE TABLE IF NOT EXISTS amazon_links (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                alexa_user_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                linked_at INTEGER NOT NULL,
+                last_seen_at INTEGER
+            );
             """
         )
         try:
@@ -409,7 +418,51 @@ class AccountStore:
     def revoke_alexa_for_user(self, user_id: int) -> None:
         with self._lock:
             self.db.execute("DELETE FROM alexa_tokens WHERE user_id = ?", (user_id,))
+            self.db.execute("DELETE FROM amazon_links WHERE user_id = ?", (user_id,))
             self.db.commit()
+
+    def record_amazon_link(self, user_id: int, alexa_user_id: str, source: str) -> None:
+        """Associe un compte Alexa à ce compte EC-to-Alexa (un seul compte Alexa par compte)."""
+        if not alexa_user_id.startswith("amzn1.") or len(alexa_user_id) > 512:
+            raise ValueError("Identifiant Alexa invalide.")
+        now = int(time.time())
+        with self._lock:
+            self.db.execute(
+                """
+                INSERT INTO amazon_links(user_id, alexa_user_id, source, linked_at, last_seen_at)
+                VALUES (?, ?, ?, ?, NULL)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    alexa_user_id=excluded.alexa_user_id,
+                    source=excluded.source,
+                    linked_at=CASE WHEN amazon_links.alexa_user_id = excluded.alexa_user_id
+                                   THEN amazon_links.linked_at ELSE excluded.linked_at END
+                """,
+                (user_id, alexa_user_id, source, now),
+            )
+            self.db.commit()
+
+    def touch_alexa_user(self, user_id: int, alexa_user_id: str) -> None:
+        """Mémorise le compte Alexa qui interroge la skill (liaison faite depuis l'app Alexa)."""
+        if not alexa_user_id.startswith("amzn1."):
+            return
+        row = self.db.execute(
+            "SELECT alexa_user_id FROM amazon_links WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if not row or row["alexa_user_id"] != alexa_user_id:
+            self.record_amazon_link(user_id, alexa_user_id, "alexa_app")
+        with self._lock:
+            self.db.execute(
+                "UPDATE amazon_links SET last_seen_at = ? WHERE user_id = ?",
+                (int(time.time()), user_id),
+            )
+            self.db.commit()
+
+    def amazon_link(self, user_id: int) -> dict[str, Any] | None:
+        row = self.db.execute(
+            "SELECT alexa_user_id, source, linked_at, last_seen_at FROM amazon_links WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
     def ecole_directe_info(self, user_id: int) -> dict[str, str | None] | None:
         row = self.db.execute(
@@ -427,6 +480,7 @@ class AccountStore:
         with self._lock:
             self.db.execute("DELETE FROM ecole_directe_connections WHERE user_id = ?", (user_id,))
             self.db.execute("DELETE FROM alexa_tokens WHERE user_id = ?", (user_id,))
+            self.db.execute("DELETE FROM amazon_links WHERE user_id = ?", (user_id,))
             self.db.commit()
 
     def issue_csrf(self, session: str, ttl: int = 86_400) -> str:
@@ -485,6 +539,7 @@ class AccountStore:
             "created_at": int(row["created_at"]),
             "ecole_directe_connected": self.has_ecole_directe_connection(user_id),
             "ecole_directe": self.ecole_directe_info(user_id),
+            "amazon": self.amazon_link(user_id),
         }
 
     def audit(self, user_id: int, event: str) -> None:
@@ -634,6 +689,11 @@ class AlexaSkill:
             user_id = self.store.user_for_token(access_token, "alexa_tokens")
         except PermissionError:
             return self._link_account()
+        alexa_user = (
+            ((request.get("context") or {}).get("System") or {}).get("user") or {}
+        ).get("userId") or ((request.get("session") or {}).get("user") or {}).get("userId")
+        if alexa_user:
+            self.store.touch_alexa_user(user_id, str(alexa_user))
         return self.handle_for_user(user_id, request)
 
     def handle_for_user(self, user_id: int, request: dict[str, Any]) -> dict[str, Any]:

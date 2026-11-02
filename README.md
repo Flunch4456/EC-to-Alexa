@@ -161,14 +161,33 @@ terminer par « Skill … configurée, liaison de compte active ».
 
 ## Étape 6 — Activer la skill et lier ton compte
 
-1. Dans la console Amazon, onglet **Test** : passe **Skill testing is enabled
-   in** sur **Development**.
-2. Dans l'**application Alexa** du téléphone (même compte Amazon) :
+Dans la console Amazon, onglet **Test** : passe **Skill testing is enabled in**
+sur **Development**. Ensuite, deux façons de lier, au choix.
+
+### Depuis le site (recommandé)
+
+Sur le tableau de bord, étape 3, **Lier mon compte Amazon** : connecte-toi
+avec le compte Amazon de ton Echo et accepte. La skill est activée et liée
+d'un coup, et le site affiche le compte Alexa associé à ton École Directe
+(fin de son identifiant `amzn1.ask.account…`, date de liaison, dernière
+demande). Chaque compte EC-to-Alexa est lié à un seul compte Alexa : c'est ce
+qui permet de savoir quel compte Amazon lit quel École Directe.
+
+Prérequis (une fois) : dans **Build → Account Linking**, active **Allow users
+to link their account to your skill from within your application or
+website**, ajoute `https://ton-domaine/amazon/callback` dans **Your Redirect
+URLs**, **Save**, puis relance `./install.sh` et colle l'**Alexa Client Id**
+et l'**Alexa Client Secret** (bouton **SHOW**) affichés sur cette page.
+
+### Depuis l'application Alexa
+
+1. Dans l'**application Alexa** du téléphone (même compte Amazon) :
    **Plus → Skills et jeux → Vos skills → Dév.** → **Mon Carnet Scolaire** →
    **Activer**.
-3. Une page **« Autoriser Alexa »** s'ouvre : saisis l'e-mail et le mot de
+2. Une page **« Autoriser Alexa »** s'ouvre : saisis l'e-mail et le mot de
    passe du **compte EC-to-Alexa** créé à l'étape 3, puis **Autoriser**.
-   L'application doit confirmer que le compte est associé.
+   L'application doit confirmer que le compte est associé. Le site affichera
+   le compte Alexa lié dès la première demande.
 
 ## Étape 7 — Parler à Alexa
 

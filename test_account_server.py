@@ -158,3 +158,99 @@ class AccountSiteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeAmazon:
+    """Imite Login with Amazon et l'API Skill Enablement, puis l'échange du code par Amazon."""
+
+    def __init__(self, store, client_id):
+        self.store, self.client_id, self.calls = store, client_id, []
+
+    def __call__(self, method, url, headers, body):
+        self.calls.append((method, url))
+        if url.endswith("/auth/o2/token"):
+            fields = urllib.parse.parse_qs(body.decode())
+            assert fields["code_verifier"][0] and fields["code"][0] == "code-amazon"
+            return 200, {"access_token": "jeton-amazon"}
+        if url.endswith("/alexaApiEndpoint"):
+            return 200, {"endpoints": ["api.eu.amazonalexa.com"]}
+        if url.endswith("/enablement"):
+            request = json.loads(body)
+            link = request["accountLinkRequest"]
+            # Amazon échange notre code sur /oauth/token, avec la même redirectUri.
+            self.store.exchange_authorization_code(link["authCode"], self.client_id, link["redirectUri"])
+            return 201, {"user": {"id": "amzn1.ask.account.TESTUSER42"},
+                         "accountLink": {"status": "LINKED"}, "status": "ENABLED"}
+        return 404, {}
+
+
+class AmazonLinkFlowTests(AccountSiteTests):
+    def setUp(self):
+        super().setUp()
+        from amazon_link import AmazonSkillLinker
+        self.fake = FakeAmazon(self.store, "ec-to-alexa")
+        account_server.AccountHandler.linker = AmazonSkillLinker(
+            "amzn1.application-oa2-client.test", "secret", "amzn1.ask.skill.test",
+            "https://ec-to-alexa.example/amazon/callback", http=self.fake,
+        )
+        account_server.AccountHandler.oauth_client_id = "ec-to-alexa"
+        account_server.AccountHandler.amazon_pending = account_server.PendingAmazon()
+
+    def tearDown(self):
+        account_server.AccountHandler.linker = None
+        super().tearDown()
+
+    def connected_page(self):
+        _, page = self.register()
+        _, page = self.post("/connect-ecole-directe", csrf=self.csrf(page),
+                            identifiant="eleve", ecole_password="secret")
+        _, page = self.post("/qcm", csrf=self.csrf(page), choix="Mars")
+        return page
+
+    def test_link_from_site_records_amazon_account(self):
+        page = self.connected_page()
+        link = re.search(r'href="(/amazon/link\?csrf=[^"]+)"', page).group(1)
+        no_redirect = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(self.jar),
+            type("NoRedirect", (urllib.request.HTTPRedirectHandler,), {
+                "redirect_request": lambda *a, **k: None})(),
+        )
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            no_redirect.open(self.base + link.replace("&amp;", "&"), timeout=5)
+        location = caught.exception.headers["Location"]
+        self.assertTrue(location.startswith("https://www.amazon.com/ap/oa?"))
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
+        self.assertEqual(params["scope"], ["alexa::skills:account_linking"])
+        self.assertEqual(params["code_challenge_method"], ["S256"])
+        state = params["state"][0]
+        status, page = self.get(f"/amazon/callback?code=code-amazon&state={state}")
+        self.assertIn("Ton compte Amazon est lié", page)
+        self.assertIn("…STUSER42", page)  # 8 derniers caractères de l'identifiant Alexa
+        user_id = self.store.user_for_login("eleve@example.test", "motdepasse-solide")
+        self.assertEqual(self.store.amazon_link(user_id)["alexa_user_id"], "amzn1.ask.account.TESTUSER42")
+        self.assertEqual(self.store.alexa_link_count(user_id), 1)
+        self.assertTrue(any("api.eu.amazonalexa.com" in url for _, url in self.fake.calls))
+        # Un state rejoué ne relie rien une seconde fois.
+        with self.assertRaises(urllib.error.HTTPError) as replay:
+            self.get(f"/amazon/callback?code=code-amazon&state={state}")
+        self.assertEqual(replay.exception.code, 400)
+        self.assertIn("a expiré", replay.exception.read().decode())
+
+    def test_link_requires_csrf_and_ecole_directe(self):
+        _, page = self.register()
+        self.assertNotIn("/amazon/link", page)
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.get("/amazon/link?csrf=faux")
+        self.assertEqual(caught.exception.code, 403)
+        self.assertIn("Le lien a expiré", caught.exception.read().decode())
+
+    def test_alexa_requests_identify_the_amazon_account(self):
+        self.connected_page()
+        user_id = self.store.user_for_login("eleve@example.test", "motdepasse-solide")
+        token = self.store.create_alexa_token(user_id)
+        skill = account_server.AccountHandler.skill
+        skill.handle(token, {"context": {"System": {"user": {"userId": "amzn1.ask.account.APPLINK"}}},
+                             "request": {"type": "LaunchRequest"}})
+        link = self.store.amazon_link(user_id)
+        self.assertEqual((link["alexa_user_id"], link["source"]), ("amzn1.ask.account.APPLINK", "alexa_app"))
+        self.assertIsNotNone(link["last_seen_at"])
