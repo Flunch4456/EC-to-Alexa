@@ -19,9 +19,8 @@ déploiement.
 - [x] Adaptateur Alexa pour devoirs, absences, messages, aide et arrêt.
 - [x] Serveur HTTP local des routes OAuth et du webhook Alexa.
 - [x] Endpoint `/healthz`, en-têtes `nosniff`/CSP et healthcheck Docker.
-- [x] Dockerfile, Compose, variables d'environnement et guides
-  [`configuration.md`](./configuration.md) et
-  [`installation.md`](./installation.md).
+- [x] Dockerfile, Compose, variables d'environnement et guides (branches
+  `installation-serveur` et `configuration-alexa-skill`).
 
 ## Prochaine exécution autonome
 
@@ -39,15 +38,45 @@ déploiement.
   sans accepter un identifiant élève fourni arbitrairement par le navigateur.
 - [x] Ajouter un tableau de bord authentifié et une déconnexion EcoleDirecte
   avec révocation de la liaison.
-- [ ] Ajouter les intents emploi du temps, prochain cours et évaluations
-  uniquement à partir des réponses API réellement disponibles.
+- [x] Ajouter les intents emploi du temps, prochain cours, notes et
+  évaluations du cahier de texte, avec des réponses vocales détaillées
+  ([`alexa_speech.py`](./alexa_speech.py)).
+- [x] Modèle vocal fr-FR et manifeste dans [`skill-package/`](./skill-package).
+- [x] Webhook `/alexa` : jeton lu dans le corps de la requête, carte
+  LinkAccount, LaunchRequest, vérification `ALEXA_SKILL_ID` et horodatage.
+- [x] Installation en une commande : `install.sh` (Docker, `.env`, secrets,
+  Caddy HTTPS intégré au compose, valeurs pour la console Alexa).
+- [x] Account Linking : trois URL de redirection Amazon via `ALEXA_VENDOR_ID`,
+  secret client vérifié (HTTP Basic ou corps), démarrage sans configuration
+  Alexa.
+- [x] Vérifier la signature des requêtes Amazon (`Signature-256`, chaîne de
+  certificats jusqu'à une racine de confiance, SAN `echo-api.amazon.com`).
+- [x] Terminer le QCM École Directe depuis le site et mémoriser l'appareil
+  (UUID, cn/cv chiffrés) pour éviter un QCM à chaque requête Alexa.
+- [x] Mémoriser les réponses au QCM (HMAC, jamais en clair) et y répondre
+  automatiquement ; question inconnue → Alexa renvoie l'élève vers le site.
+- [x] Interface web : accueil, tableau de bord en trois étapes, simulateur
+  « Essayer sans enceinte », révocation Alexa, page de liaison OAuth.
+- [x] Caddy optionnel (`COMPOSE_PROFILES`) pour un reverse proxy existant.
+- [x] Profil `router` derrière Zoraxy : une seule règle vers `127.0.0.1:8080`
+  (Zoraxy retire le préfixe des répertoires virtuels), ports réglables.
+- [x] Skill « Mon Carnet Scolaire » créée dans la console Amazon (fr-FR,
+  Custom, Provision your own) et modèle vocal importé.
+- [x] Console Amazon : endpoint HTTPS et Account Linking configurés sur le
+  domaine public.
+- [x] Liaison du compte Amazon depuis le site (« Lier mon compte Amazon ») et
+  affichage du compte Alexa associé à chaque École Directe.
+- [x] Routeur HTTPS interne (8443) : trajet proxy → serveur chiffré.
+- [x] Journal des requêtes Alexa refusées (raison, sans donnée sensible).
+- [x] Sauvegarde automatique de la base à chaque `update.sh`.
 - [x] Brancher le healthcheck sur le processus web principal.
 - [x] Ajouter une configuration reverse proxy avec en-têtes de sécurité,
   HTTPS et limites de taille.
 - [x] Ajouter une configuration Caddy séparant les routes comptes et OAuth.
 - [x] Ajouter export/suppression de compte et journal d'audit non sensible.
 - [ ] Ajouter expiration des données scolaires et purge automatique du cache.
-- [ ] Tester la skill dans la console Alexa avec un domaine HTTPS réel.
+- [x] Tester la skill dans la console Alexa avec un domaine HTTPS réel
+  (simulateur : accueil et emploi du temps avec un vrai compte École Directe).
 - [ ] Effectuer un audit de sécurité et une validation manuelle EcoleDirecte
   avant toute exposition publique.
 

@@ -7,7 +7,7 @@ import base64
 from http.client import RemoteDisconnected
 from getpass import getpass
 from http.cookies import SimpleCookie
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -50,15 +50,50 @@ class EcoleDirecteError(RuntimeError):
     """Erreur renvoyee par l'API ou par la connexion."""
 
 
+class EcoleDirecteQcmRequired(EcoleDirecteError):
+    """EcoleDirecte demande le QCM de securite : une action humaine est requise.
+
+    ``question`` contient la question posee (si elle a pu etre lue) et
+    ``known`` indique si une reponse memorisee existait mais a ete refusee.
+    """
+
+    def __init__(self, message: str, question: dict[str, Any] | None = None, known: bool = False) -> None:
+        super().__init__(message)
+        self.question = question
+        self.known = known
+
+
 class EcoleDirecteClient:
-    def __init__(self, identifiant: str, mot_de_passe: str) -> None:
+    def __init__(
+        self,
+        identifiant: str,
+        mot_de_passe: str,
+        device_uuid: str | None = None,
+        cn: str | None = None,
+        cv: str | None = None,
+        timeout: float = 20,
+    ) -> None:
         self.identifiant = identifiant
         self.mot_de_passe = mot_de_passe
         self.token: str | None = None
         self.student_id: str | None = None
         self.gtk: str | None = None
         self.qcm_token: str | None = None
-        self.device_uuid = str(uuid4())
+        # Un UUID stable par liaison evite que chaque reconnexion ressemble a un
+        # nouvel appareil (ce qui declencherait le QCM a chaque requete Alexa).
+        self.device_uuid = device_uuid or str(uuid4())
+        # Valeurs obtenues apres un QCM reussi, reutilisees aux reconnexions.
+        self.cn = cn
+        self.cv = cv
+        self.timeout = timeout
+        # Reponse automatique au QCM (voir ensure_login) :
+        # qcm_resolver(question, propositions) -> proposition memorisee ou None ;
+        # on_qcm_answered(question, choix) apres une reponse acceptee ;
+        # on_qcm_rejected(question, choix) si une reponse memorisee est refusee.
+        self.qcm_resolver: Callable[[str, list[str]], str | None] | None = None
+        self.on_qcm_answered: Callable[[str, str], None] | None = None
+        self.on_qcm_rejected: Callable[[str, str], None] | None = None
+        self.qcm_auto_answered = False
 
     def _get_gtk(self) -> None:
         request = Request(
@@ -66,7 +101,7 @@ class EcoleDirecteClient:
             headers={"User-Agent": self._user_agent()},
         )
         try:
-            with urlopen(request, timeout=20) as response:
+            with urlopen(request, timeout=self.timeout) as response:
                 cookies = SimpleCookie(response.headers.get("Set-Cookie", ""))
         except (HTTPError, URLError, RemoteDisconnected, ConnectionResetError, TimeoutError) as error:
             raise EcoleDirecteError(f"Impossible d'obtenir le cookie GTK : {error}") from error
@@ -110,7 +145,7 @@ class EcoleDirecteClient:
 
         request = Request(f"{API_URL}/{endpoint.lstrip('/')}", data=body, headers=headers)
         try:
-            with urlopen(request, timeout=20) as response:
+            with urlopen(request, timeout=self.timeout) as response:
                 response_headers = response.headers
                 result = json.load(response)
         except (HTTPError, URLError, RemoteDisconnected, ConnectionResetError, TimeoutError) as error:
@@ -205,18 +240,53 @@ class EcoleDirecteClient:
         cv = data.get("cv")
         if not cn or not cv:
             raise EcoleDirecteError("La reponse QCM ne contient pas les valeurs cn/cv.")
-        return self.login(cn=cn, cv=cv)
+        self.cn, self.cv = str(cn), str(cv)
+        return self.login(cn=self.cn, cv=self.cv)
+
+    def ensure_login(self) -> None:
+        """Connecte le client sans interaction.
+
+        Si Ecole Directe pose le QCM et qu'une reponse deja validee est connue
+        pour cette question (qcm_resolver), elle est envoyee automatiquement.
+        Sinon EcoleDirecteQcmRequired est levee : un humain doit repondre.
+        """
+        result = self.login(cn=self.cn, cv=self.cv)
+        if result.get("code") not in (250, "250") and self.token:
+            return
+        if result.get("code") not in (250, "250") or self.qcm_resolver is None:
+            raise EcoleDirecteQcmRequired("EcoleDirecte demande une verification de securite.")
+        question = self.get_qcm().get("data") or {}
+        text = str(question.get("question") or "")
+        propositions = [str(value) for value in question.get("propositions") or []]
+        choice = self.qcm_resolver(text, propositions) if text and propositions else None
+        if choice is None or choice not in propositions:
+            raise EcoleDirecteQcmRequired(
+                "EcoleDirecte pose une question de securite inconnue.", question=question
+            )
+        try:
+            self.complete_qcm(choice)
+        except EcoleDirecteError as error:
+            if self.on_qcm_rejected:
+                self.on_qcm_rejected(text, choice)
+            raise EcoleDirecteQcmRequired(
+                "La reponse memorisee au QCM a ete refusee.", question=question, known=True
+            ) from error
+        if not self.token:
+            raise EcoleDirecteQcmRequired("EcoleDirecte demande une verification de securite.")
+        self.qcm_auto_answered = True
+        if self.on_qcm_answered:
+            self.on_qcm_answered(text, choice)
 
     def get(self, endpoint: str, **params: Any) -> dict[str, Any]:
         if not self.token:
-            self.login()
+            self.ensure_login()
         try:
             return self._request(endpoint, params)
         except EcoleDirecteError as error:
             if "token invalide" not in str(error).lower():
                 raise
             self.token = None
-            self.login()
+            self.ensure_login()
             return self._request(endpoint, params)
 
 
