@@ -1,19 +1,36 @@
 # Utilisé par le service « router » de docker-compose.yml (COMPOSE_PROFILES=router).
-# Le proxy existant (Zoraxy…) termine HTTPS et envoie tout le domaine ici, en
-# HTTP ; ce routeur répartit les chemins sans les modifier.
+# Le proxy existant (Zoraxy…) termine le HTTPS public (Let's Encrypt) et envoie
+# tout le domaine ici ; ce routeur répartit les chemins sans les modifier.
+#
+#   :8443  HTTPS avec le certificat interne de router-tls/ (généré par
+#          install.sh). Dans Zoraxy : « Require TLS » + « Skip Verification ».
+#   :8080  HTTP, pour un proxy sur la même machine ou des tests locaux.
 {
-	auto_https off
+	# Certificats chargés manuellement : pas de redirection HTTP→HTTPS ni
+	# d'obtention automatique de certificat.
+	auto_https disable_redirects
+	# Zoraxy contacte une adresse IP et n'envoie alors pas de SNI.
+	default_sni {$DOMAIN:localhost}
 	servers {
 		# Conserve l'IP réelle transmise par le proxy dans X-Forwarded-For.
 		trusted_proxies static private_ranges
 	}
 }
 
-:8080 {
+(routes) {
 	request_body {
 		max_size 64KB
 	}
 	reverse_proxy /oauth/* oauth:8001
 	reverse_proxy /alexa oauth:8001
 	reverse_proxy web:8000
+}
+
+:8443 {
+	tls /etc/caddy/tls/router.crt /etc/caddy/tls/router.key
+	import routes
+}
+
+:8080 {
+	import routes
 }

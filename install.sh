@@ -101,6 +101,7 @@ default_env ALEXA_OAUTH_CLIENT_ID "ec-to-alexa"
 default_env WEB_PORT "8000"
 default_env OAUTH_PORT "8001"
 default_env ROUTER_PORT "8080"
+default_env ROUTER_TLS_PORT "8443"
 # Les affectations propagent l'échec d'openssl à set -e (un argument ne le ferait pas).
 if [ -z "$(get_env ECO_TO_ALEXA_SECRET_KEY)" ]; then
 	# Clé Fernet : 32 octets en base64 url-safe, avec le « = » final obligatoire.
@@ -139,6 +140,23 @@ if [ -n "$USES_CADDY" ] && command -v ufw >/dev/null 2>&1 && $SUDO env LC_ALL=C 
 fi
 
 # --- 4. Construction, tests, démarrage -------------------------------------
+# Certificat interne du routeur : chiffre le trajet Zoraxy → serveur sur le
+# réseau local (Zoraxy : « Require TLS » + « Skip Verification »).
+if [ -n "$USES_ROUTER" ] && { [ ! -s router-tls/router.crt ] || [ ! -s router-tls/router.key ]; }; then
+	info "Création du certificat interne du routeur (router-tls/)"
+	mkdir -p router-tls
+	SAN="DNS:$DOMAIN_VALUE,DNS:localhost,IP:127.0.0.1"
+	EXPOSE_VALUE="$(get_env EXPOSE_ADDR)"
+	case "$EXPOSE_VALUE" in ""|0.0.0.0|127.0.0.1) ;; *) SAN="$SAN,IP:$EXPOSE_VALUE" ;; esac
+	openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -sha256 \
+		-subj "/CN=$DOMAIN_VALUE" -addext "subjectAltName=$SAN" \
+		-keyout router-tls/router.key -out router-tls/router.crt 2>/dev/null \
+		|| die "Impossible de créer le certificat interne avec openssl."
+	# Lisible par Caddy (root dans le conteneur), pas par les autres utilisateurs.
+	chmod 700 router-tls
+	chmod 600 router-tls/router.key
+fi
+
 info "Construction des images"
 $DOCKER compose build --pull
 info "Exécution des tests"
@@ -162,6 +180,14 @@ for port in $CHECK_PORTS; do
 	done
 	[ -n "$ok" ] || warn "Le service du port $port ne répond pas : $DOCKER compose logs --tail=50"
 done
+if [ -n "$USES_ROUTER" ]; then
+	# -k : certificat interne auto-signé, vérifié ici seulement pour la disponibilité.
+	if curl -kfsS --max-time 5 "https://$CHECK_HOST:$(get_env ROUTER_TLS_PORT)/healthz" >/dev/null 2>&1; then
+		info "Routeur HTTPS interne opérationnel sur https://$CHECK_HOST:$(get_env ROUTER_TLS_PORT)"
+	else
+		warn "Le routeur HTTPS ($CHECK_HOST:$(get_env ROUTER_TLS_PORT)) ne répond pas : $DOCKER compose logs --tail=50 router"
+	fi
+fi
 if curl -fsS --max-time 20 "https://$DOMAIN_VALUE/healthz" >/dev/null 2>&1; then
 	info "HTTPS opérationnel sur https://$DOMAIN_VALUE"
 else
@@ -172,7 +198,7 @@ fi
 cat <<EOF
 
 $( if [ -n "$USES_ROUTER" ]; then
-	printf '%s\n' "Reverse proxy externe (Zoraxy…) : UNE règle pour $DOMAIN_VALUE vers http://$CHECK_HOST:$(get_env ROUTER_PORT), sans répertoire virtuel, certificat Let's Encrypt."
+	printf '%s\n' "Reverse proxy externe (Zoraxy…) : UNE règle pour $DOMAIN_VALUE vers $CHECK_HOST:$(get_env ROUTER_TLS_PORT) avec « Require TLS » et « Skip Verification » (certificat interne), sans répertoire virtuel, certificat Let's Encrypt côté public. Proxy sur la même machine : http://$CHECK_HOST:$(get_env ROUTER_PORT) convient aussi."
 elif [ -z "$USES_CADDY" ]; then
 	printf '%s\n' "Reverse proxy externe : https://$DOMAIN_VALUE/oauth/* et /alexa vers $CHECK_HOST:$(get_env OAUTH_PORT) SANS retirer le préfixe, le reste vers $CHECK_HOST:$(get_env WEB_PORT). Avec Zoraxy, utilisez plutôt COMPOSE_PROFILES=router."
 fi )

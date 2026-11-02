@@ -178,7 +178,8 @@ libérer les ports : `sudo systemctl disable --now caddy`.
 
 Si les ports 80/443 sont déjà utilisés par un autre proxy, utilisez le
 profil `router` : Caddy ne gère plus HTTPS et sert seulement de routeur HTTP
-interne sur `EXPOSE_ADDR:ROUTER_PORT` (`127.0.0.1:8080` par défaut).
+interne sur `EXPOSE_ADDR:ROUTER_PORT` (`127.0.0.1:8080` par défaut), et en
+HTTPS avec un certificat interne sur `EXPOSE_ADDR:ROUTER_TLS_PORT` (`8443`).
 
 ```bash
 COMPOSE_PROFILES=router ./install.sh
@@ -264,9 +265,9 @@ par votre domaine.
 
 ```
 Alexa / navigateur ──HTTPS 443──▶ box ──▶ Zoraxy (certificat Let's Encrypt)
-                                              │ HTTP, chemin intact
+                                              │ HTTPS interne, chemin intact
                                               ▼
-                               router :8080 (Caddy, HTTP seul)
+              router :8443 (HTTPS, certificat interne) ou :8080 (HTTP)
                                  ├─ /oauth/*, /alexa ─▶ oauth :8001
                                  └─ tout le reste ────▶ web   :8000
 ```
@@ -282,7 +283,7 @@ redirections existent déjà : il n'y a **rien à ajouter** pour EC-to-Alexa.
 | 443 | TCP | IP locale de Zoraxy, port 443 | Alexa (webhook et liaison de compte), site |
 | 80 | TCP | IP locale de Zoraxy, port 80 | Validation et renouvellement Let's Encrypt, redirection vers HTTPS |
 
-Ne redirigez **jamais** 8000, 8001, 8080 ni le port d'administration de
+Ne redirigez **jamais** 8000, 8001, 8080, 8443 ni le port d'administration de
 Zoraxy : ils restent accessibles seulement depuis la machine ou le réseau
 local. Le port 443/UDP (HTTP/3) est inutile ici.
 
@@ -327,10 +328,15 @@ Selon l'emplacement de Zoraxy, éditez `.env` **avant** l'installation :
 
 | Zoraxy est… | Dans `.env` | Cible à donner à Zoraxy |
 | --- | --- | --- |
-| sur la **même machine** | `WEB_PORT=18000` (l'interface de Zoraxy occupe déjà 8000) | `127.0.0.1:8080` |
-| sur une **autre machine** du réseau | `EXPOSE_ADDR=IP_LOCALE_DU_SERVEUR` | `IP_LOCALE_DU_SERVEUR:8080` |
+| sur la **même machine** | `WEB_PORT=18000` (l'interface de Zoraxy occupe déjà 8000) | `127.0.0.1:8443` en TLS (ou `127.0.0.1:8080` en HTTP) |
+| sur une **autre machine** du réseau | `EXPOSE_ADDR=IP_LOCALE_DU_SERVEUR` | `IP_LOCALE_DU_SERVEUR:8443` en TLS |
 
-Dans le second cas, les ports 8000, 8001 et 8080 deviennent joignables en HTTP
+En mode `router`, `install.sh` crée un certificat interne auto-signé dans
+`router-tls/` (valable 10 ans, ignoré par Git) : le trajet Zoraxy → serveur
+reste chiffré sur le réseau local. Pour le régénérer (changement d'IP),
+supprimez `router-tls/` et relancez `./install.sh`.
+
+Dans le second cas, les ports 8000, 8001, 8080 et 8443 deviennent joignables
 depuis tout le réseau local (Docker contourne `ufw`) : c'est acceptable sur un
 réseau domestique, mais ne les redirigez jamais sur la box. Inutile de toucher
 à `ECO_TO_ALEXA_TRUSTED_PROXIES` : le routeur transmet déjà l'IP réelle reçue
@@ -365,8 +371,12 @@ Les intitulés peuvent varier légèrement selon la version de Zoraxy.
    a domain that has a wildcard certificate ».
 3. **Create Proxy Rules** :
    - type : **Host** (sous-domaine), domaine `ec-to-alexa.nial-tech.com` ;
-   - cible : `127.0.0.1:8080` (ou `IP_LOCALE_DU_SERVEUR:8080`) ;
-   - **Proxy Target require TLS** : **désactivé** (le routeur parle en HTTP) ;
+   - cible : `IP_LOCALE_DU_SERVEUR:8443` (ou `127.0.0.1:8443` sur la même
+     machine) ;
+   - **Require TLS** : **activé**, et **Skip Verification** : **activé** (le
+     certificat interne est auto-signé). En HTTP sur le port 8080, ces deux
+     options doivent au contraire être désactivées ;
+   - **Health-check URI** (onglet Destinations) : `/healthz` ;
    - **aucun répertoire virtuel** : Zoraxy retirerait le préfixe
      (`/oauth/token` arriverait en `/token`) ;
    - créez la règle.
@@ -383,7 +393,8 @@ Les intitulés peuvent varier légèrement selon la version de Zoraxy.
 Sur le serveur :
 
 ```bash
-curl -s http://127.0.0.1:8080/healthz          # {"status":"ok"}  (routeur → web)
+curl -sk https://IP_LOCALE_DU_SERVEUR:8443/healthz   # {"status":"ok"}  (routeur HTTPS → web)
+curl -s  http://IP_LOCALE_DU_SERVEUR:8080/healthz    # {"status":"ok"}  (routeur HTTP → web)
 docker compose ps                               # web, oauth, router : running/healthy
 ```
 
@@ -407,7 +418,7 @@ curl -s -X POST -H "Content-Type: application/json" -d '{}' https://ec-to-alexa.
 | `{"error": "oauth_not_configured"}` | `ALEXA_VENDOR_ID` ou le secret client manquent : relancez `./install.sh`. |
 | `{"error": "alexa_not_configured"}` | `ALEXA_SKILL_ID` manquant : relancez `./install.sh`. |
 | Trop de redirections (308) | Le Caddy HTTPS intégré tourne encore : relancez avec `COMPOSE_PROFILES=router`. |
-| `502 Bad Gateway` dans Zoraxy | Cible erronée (port 8080, IP) ou option « require TLS » activée. |
+| `502 Bad Gateway` ou 521 « Web server is down » (page Zoraxy) | Zoraxy ne joint pas le serveur : `EXPOSE_ADDR` resté à `127.0.0.1` alors que Zoraxy est sur une autre machine, mauvais port, ou « Require TLS » activé vers le port HTTP 8080 (utilisez 8443). |
 
 ### Z6. Terminer dans la console Alexa
 
