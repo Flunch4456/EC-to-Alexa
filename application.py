@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import secrets
 import sqlite3
+import threading
 import time
 from datetime import date, timedelta
 from typing import Any
@@ -18,11 +20,74 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 from ecole_directe import EcoleDirecteClient, EcoleDirecteError
 
+MAX_BODY_SIZE = 32_768
+
+
+class SharedRateLimiter:
+    """Bounded, process-wide limiter shared by all authentication endpoints."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._attempts: dict[str, list[float]] = {}
+        self._last_cleanup = 0.0
+
+    def allow(self, keys: tuple[str, ...], limit: int = 10, window: int = 60) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_cleanup >= 60:
+                self._attempts = {
+                    key: values
+                    for key, values in self._attempts.items()
+                    if values and now - values[-1] < window
+                }
+                self._last_cleanup = now
+            allowed = True
+            for key in keys:
+                values = [stamp for stamp in self._attempts.get(key, []) if now - stamp < window]
+                if len(values) >= limit:
+                    allowed = False
+                values.append(now)
+                self._attempts[key] = values[-limit:]
+            return allowed
+
+
+def trusted_client_address(handler: Any) -> str:
+    """Use forwarded addresses only when the immediate proxy is explicitly trusted."""
+    address = handler.client_address[0]
+    trusted = {
+        value.strip()
+        for value in os.environ.get("ECO_TO_ALEXA_TRUSTED_PROXIES", "").split(",")
+        if value.strip()
+    }
+    if address in trusted:
+        forwarded = handler.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
+        if forwarded and len(forwarded) <= 64:
+            return forwarded
+    return address
+
+
+def read_body(handler: Any, content_type: str, max_size: int = MAX_BODY_SIZE) -> bytes:
+    """Read exactly one bounded UTF-8 request body with an unambiguous length."""
+    raw_length = handler.headers.get("Content-Length")
+    if raw_length is None or "," in raw_length or not raw_length.strip().isdigit():
+        raise ValueError("Content-Length invalide.")
+    length = int(raw_length.strip())
+    if length < 0 or length > max_size:
+        raise ValueError("Requête trop volumineuse.")
+    actual_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if actual_type != content_type:
+        raise ValueError("Content-Type invalide.")
+    body = handler.rfile.read(length)
+    if len(body) != length:
+        raise ValueError("Corps de requête incomplet.")
+    return body
+
 
 class AccountStore:
     """Small SQLite-backed account and token store with tenant isolation."""
 
     def __init__(self, path: str = "ec_to_alexa.sqlite3", secret_key: bytes | None = None) -> None:
+        self._lock = threading.RLock()
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
@@ -62,6 +127,11 @@ class AccountStore:
                 user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
                 event TEXT NOT NULL,
                 created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS csrf_tokens (
+                session_hash TEXT PRIMARY KEY,
+                token_hash TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
             );
             """
         )
@@ -112,11 +182,16 @@ class AccountStore:
         return int(cursor.lastrowid)
 
     def user_for_login(self, email: str, password: str) -> int:
-        row = self.db.execute(
-            "SELECT id, password_hash FROM users WHERE email = ? COLLATE NOCASE",
-            (email.strip(),),
-        ).fetchone()
-        if not row or not self._password_matches(password, row["password_hash"]):
+        with self._lock:
+            row = self.db.execute(
+                "SELECT id, password_hash FROM users WHERE email = ? COLLATE NOCASE",
+                (email.strip(),),
+            ).fetchone()
+        # Keep the work factor similar for unknown accounts.
+        valid = row and self._password_matches(password, row["password_hash"])
+        if not row:
+            self._password_matches(password, self._password_hash("invalid-account"))
+        if not valid:
             raise PermissionError("Identifiants invalides.")
         return int(row["id"])
 
@@ -142,8 +217,11 @@ class AccountStore:
         return int(row["user_id"])
 
     def logout(self, token: str) -> None:
-        self.db.execute("DELETE FROM sessions WHERE token_hash = ?", (self._hash_token(token),))
-        self.db.commit()
+        with self._lock:
+            token_hash = self._hash_token(token)
+            self.db.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+            self.db.execute("DELETE FROM csrf_tokens WHERE session_hash = ?", (token_hash,))
+            self.db.commit()
 
     def has_ecole_directe_connection(self, user_id: int) -> bool:
         return (
@@ -182,29 +260,40 @@ class AccountStore:
     def exchange_authorization_code(
         self, code: str, client_id: str, redirect_uri: str
     ) -> str:
-        row = self.db.execute(
-            """
-            SELECT user_id FROM oauth_codes
-            WHERE code_hash = ? AND client_id = ? AND redirect_uri = ?
-              AND expires_at > ? AND used = 0
-            """,
-            (self._hash_token(code), client_id, redirect_uri, int(time.time())),
-        ).fetchone()
-        if not row:
-            raise PermissionError("Code OAuth invalide, expiré ou déjà utilisé.")
-        self.db.execute(
-            "UPDATE oauth_codes SET used = 1 WHERE code_hash = ?",
-            (self._hash_token(code),),
-        )
-        token = self.create_alexa_token(int(row["user_id"]))
-        self.db.commit()
-        return token
+        with self._lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            row = self.db.execute(
+                """
+                SELECT user_id FROM oauth_codes
+                WHERE code_hash = ? AND client_id = ? AND redirect_uri = ?
+                  AND expires_at > ? AND used = 0
+                """,
+                (self._hash_token(code), client_id, redirect_uri, int(time.time())),
+            ).fetchone()
+            if not row:
+                self.db.rollback()
+                raise PermissionError("Code OAuth invalide, expiré ou déjà utilisé.")
+            updated = self.db.execute(
+                "UPDATE oauth_codes SET used = 1 WHERE code_hash = ? AND used = 0",
+                (self._hash_token(code),),
+            ).rowcount
+            if updated != 1:
+                self.db.rollback()
+                raise PermissionError("Code OAuth invalide, expiré ou déjà utilisé.")
+            token = secrets.token_urlsafe(32)
+            self.db.execute(
+                "INSERT INTO alexa_tokens VALUES (?, ?, ?)",
+                (self._hash_token(token), int(row["user_id"]), int(time.time()) + 31_536_000),
+            )
+            self.db.commit()
+            return token
 
     def revoke_alexa_token(self, token: str) -> None:
-        self.db.execute(
-            "DELETE FROM alexa_tokens WHERE token_hash = ?", (self._hash_token(token),)
-        )
-        self.db.commit()
+        with self._lock:
+            self.db.execute(
+                "DELETE FROM alexa_tokens WHERE token_hash = ?", (self._hash_token(token),)
+            )
+            self.db.commit()
 
     def save_ecole_directe_connection(
         self, user_id: int, identifiant: str, mot_de_passe: str, student_id: str
@@ -229,14 +318,14 @@ class AccountStore:
         self.db.commit()
 
     def ecole_directe_client(self, user_id: int) -> EcoleDirecteClient | None:
-        if self._fernet is None:
-            raise RuntimeError("ECO_TO_ALEXA_SECRET_KEY est requis pour déchiffrer la connexion.")
         row = self.db.execute(
             "SELECT encrypted_credentials, student_id FROM ecole_directe_connections WHERE user_id = ?",
             (user_id,),
         ).fetchone()
         if not row:
             return None
+        if self._fernet is None:
+            raise RuntimeError("ECO_TO_ALEXA_SECRET_KEY est requis pour déchiffrer la connexion.")
         try:
             identifiant, mot_de_passe = self._fernet.decrypt(row["encrypted_credentials"]).decode(
                 "utf-8"
@@ -257,8 +346,50 @@ class AccountStore:
         return {"student_id": row["student_id"], "updated_at": str(row["updated_at"])}
 
     def delete_ecole_directe_connection(self, user_id: int) -> None:
-        self.db.execute("DELETE FROM ecole_directe_connections WHERE user_id = ?", (user_id,))
-        self.db.commit()
+        with self._lock:
+            self.db.execute("DELETE FROM ecole_directe_connections WHERE user_id = ?", (user_id,))
+            self.db.execute("DELETE FROM alexa_tokens WHERE user_id = ?", (user_id,))
+            self.db.commit()
+
+    def issue_csrf(self, session: str, ttl: int = 86_400) -> str:
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            self.db.execute(
+                "INSERT OR REPLACE INTO csrf_tokens VALUES (?, ?, ?)",
+                (self._hash_token(session), self._hash_token(token), int(time.time()) + ttl),
+            )
+            self.db.commit()
+        return token
+
+    def check_csrf(self, session: str, token: str) -> bool:
+        if not session or not token:
+            return False
+        with self._lock:
+            row = self.db.execute(
+                "SELECT token_hash, expires_at FROM csrf_tokens WHERE session_hash = ?",
+                (self._hash_token(session),),
+            ).fetchone()
+        return bool(
+            row
+            and row["expires_at"] > int(time.time())
+            and hmac.compare_digest(row["token_hash"], self._hash_token(token))
+        )
+
+    def purge_expired(self, limit: int = 100) -> None:
+        with self._lock:
+            now = int(time.time())
+            for table, column in (
+                ("sessions", "expires_at"),
+                ("alexa_tokens", "expires_at"),
+                ("oauth_codes", "expires_at"),
+                ("csrf_tokens", "expires_at"),
+            ):
+                self.db.execute(
+                    f"DELETE FROM {table} WHERE rowid IN "
+                    f"(SELECT rowid FROM {table} WHERE {column} <= ? LIMIT ?)",
+                    (now, limit),
+                )
+            self.db.commit()
 
     def delete_account(self, user_id: int) -> None:
         self.db.execute("DELETE FROM users WHERE id = ?", (user_id,))
@@ -332,17 +463,13 @@ class AlexaSkill:
 
     @classmethod
     def from_store(cls, store: AccountStore) -> "AlexaSkill":
-        services: dict[int, EcoleDirecteService] = {}
-        rows = store.db.execute("SELECT id FROM users").fetchall()
-        for row in rows:
-            client = store.ecole_directe_client(int(row["id"]))
-            if client is not None:
-                services[int(row["id"])] = EcoleDirecteService(client)
-        return cls(store, services)
+        return cls(store, {})
 
     def handle(self, access_token: str, request: dict[str, Any]) -> dict[str, Any]:
         user_id = self.store.user_for_token(access_token, "alexa_tokens")
-        service = self.services.get(user_id)
+        # Reload after every request so disconnect/revocation takes effect immediately.
+        client = self.store.ecole_directe_client(user_id)
+        service = EcoleDirecteService(client) if client is not None else None
         if service is None:
             return self._response("Ton compte EcoleDirecte n'est pas connecté.")
         intent = request.get("request", {}).get("intent", {}).get("name")
@@ -393,12 +520,19 @@ class AlexaSkill:
 class OAuthAccountLinking:
     """OAuth authorization-code provider for Alexa Account Linking."""
 
-    def __init__(self, store: AccountStore, client_id: str, redirect_uri: str) -> None:
-        if not client_id or not redirect_uri.startswith("https://"):
+    def __init__(
+        self,
+        store: AccountStore,
+        client_id: str,
+        redirect_uri: str,
+        client_secret: str = "test-client-secret",
+    ) -> None:
+        if not client_id or not client_secret or not redirect_uri.startswith("https://"):
             raise ValueError("OAuth doit utiliser un client et une URL HTTPS.")
         self.store = store
         self.client_id = client_id
         self.redirect_uri = redirect_uri
+        self.client_secret = client_secret
 
     def authorize(self, email: str, password: str) -> str:
         user_id = self.store.user_for_login(email, password)
@@ -406,8 +540,18 @@ class OAuthAccountLinking:
             user_id, self.client_id, self.redirect_uri
         )
 
-    def token(self, code: str, client_id: str, redirect_uri: str) -> dict[str, Any]:
-        if client_id != self.client_id or redirect_uri != self.redirect_uri:
+    def token(
+        self,
+        code: str,
+        client_id: str,
+        redirect_uri: str,
+        client_secret: str = "test-client-secret",
+    ) -> dict[str, Any]:
+        if (
+            not hmac.compare_digest(client_id, self.client_id)
+            or not hmac.compare_digest(client_secret, self.client_secret)
+            or redirect_uri != self.redirect_uri
+        ):
             raise PermissionError("Client OAuth non autorisé.")
         access_token = self.store.exchange_authorization_code(
             code, client_id, redirect_uri

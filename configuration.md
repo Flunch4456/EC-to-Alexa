@@ -21,6 +21,9 @@ par Git. Les variables reconnues par le client actuel sont :
 | `ECO_TO_ALEXA_DB` | Non | Chemin de la base SQLite de la fondation comptes. |
 | `ALEXA_OAUTH_CLIENT_ID` | Pour OAuth | Identifiant client déclaré dans Alexa. |
 | `ALEXA_OAUTH_REDIRECT_URI` | Pour OAuth | URI HTTPS autorisée par Alexa, exactement à l'identique. |
+| `ALEXA_OAUTH_CLIENT_SECRET` | Pour OAuth | Secret client OAuth fourni par Alexa, hors dépôt. |
+| `ALEXA_SKILL_ID` | Pour Alexa | Skill ID attendu ; requis, sinon `/alexa` refuse. |
+| `ECO_TO_ALEXA_TRUSTED_PROXIES` | Reverse proxy | Adresses immédiates autorisées à fournir `X-Forwarded-For`. |
 
 Générez une clé Fernet une seule fois et stockez-la uniquement dans `.env` ou
 dans le gestionnaire de secrets du serveur :
@@ -65,8 +68,8 @@ python -m unittest discover -p "test_*.py" -v
 ```
 
 Elle crée des utilisateurs, hache les mots de passe et sépare les jetons web
-des jetons Alexa. Elle ne persiste volontairement pas encore les identifiants
-EcoleDirecte.
+des jetons Alexa. Les identifiants EcoleDirecte liés sont chiffrés avec
+Fernet ; sauvegardez la clé séparément avant toute migration.
 
 ## 3. Configuration Amazon Alexa
 
@@ -100,8 +103,10 @@ avec les tests unitaires.
 6. Après consentement, émettre un jeton opaque aléatoire dont seule
    l'empreinte est stockée côté serveur, puis retrouver l'utilisateur par son
    `user_id` interne.
-7. Configurer l'endpoint HTTPS de la skill et vérifier la signature ou le
-   certificat de la requête selon les exigences Amazon actuelles.
+7. Configurer l'endpoint HTTPS de la skill. `ALEXA_SKILL_ID`, l'horodatage,
+   la présence de la signature et une URL de certificat HTTPS Amazon autorisée
+   sont vérifiés ; la validation cryptographique complète de la chaîne Amazon
+   doit être terminée avant production, sinon le endpoint doit rester fermé.
 8. Tester d'abord en mode développement avec un compte fictif et les tests
    simulés du dépôt.
 

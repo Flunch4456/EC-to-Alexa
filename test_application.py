@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from cryptography.fernet import Fernet
 
 from application import AccountStore, AlexaSkill, OAuthAccountLinking
@@ -101,6 +102,31 @@ class OAuthAccountLinkingTests(unittest.TestCase):
             self.assertEqual(store.user_for_token(token, "alexa_tokens"), user_id)
             with self.assertRaises(PermissionError):
                 oauth.token(code, "alexa-client", "https://example.test/oauth/callback")
+            store.close()
+
+    def test_authorization_code_exchange_is_atomic_under_concurrency(self):
+        with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as tmp:
+            store = AccountStore(tmp.name)
+            user_id = store.register("a@example.test", "a" * 12)
+            oauth = OAuthAccountLinking(
+                store, "alexa-client", "https://example.test/oauth/callback"
+            )
+            code = oauth.authorize("a@example.test", "a" * 12)
+
+            def exchange():
+                try:
+                    return oauth.token(
+                        code,
+                        "alexa-client",
+                        "https://example.test/oauth/callback",
+                    )["access_token"]
+                except PermissionError:
+                    return None
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda _: exchange(), range(8)))
+            self.assertEqual(sum(result is not None for result in results), 1)
+            self.assertEqual(store.user_for_token(next(r for r in results if r), "alexa_tokens"), user_id)
             store.close()
 
     def test_oauth_rejects_non_https_redirect_uri(self):

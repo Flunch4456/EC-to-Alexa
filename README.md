@@ -45,15 +45,17 @@ Pour ouvrir le formulaire de connexion dans le navigateur :
 .\.venv\Scripts\python.exe .\web.py
 ```
 
-Ouvrez ensuite http://127.0.0.1:8000. Le serveur écoute aussi sur les autres
-interfaces : depuis un autre appareil, utilisez l'adresse IP de la machine,
-par exemple `http://192.168.1.20:8000`. Le formulaire lance la connexion avec
+Ouvrez ensuite http://127.0.0.1:8000. Le serveur écoute par défaut sur
+loopback. Pour un autre appareil, configurez explicitement
+`ECO_TO_ALEXA_HOST` derrière un reverse proxy HTTPS ; ne comptez pas sur le
+pare-feu seul. Le formulaire lance la connexion avec
 les identifiants saisis. Apres la connexion, choisissez la reponse souhaitee :
 emploi du temps, notes, absences ou messages. Si Ecole Directe renvoie le code
 250, le formulaire affiche d'abord le QCM de securite, puis termine le login
 avec les valeurs `cn` et `cv` retournees par l'API avant d'afficher ces choix.
-Les identifiants restent en memoire pendant la requete et ne sont pas ecrits
-dans un fichier. Pour le serveur de comptes avec stockage chiffré, utilisez
+Les identifiants de cette interface restent en mémoire pendant la session
+bornée et ne sont pas écrits dans un fichier. Le serveur de comptes chiffre
+la liaison persistante avec Fernet. Pour ce serveur, utilisez
 `account_server.py` et configurez `ECO_TO_ALEXA_SECRET_KEY` ; voir
 [`installation.md`](./installation.md).
 
@@ -76,17 +78,15 @@ Le serveur [`oauth_server.py`](./oauth_server.py) fournit maintenant les
 routes OAuth de test (`/oauth/authorize`, `/oauth/token`, `/oauth/revoke`) et
 le webhook `/alexa`. Le certificat HTTPS, l'identifiant de skill et la
 validation Amazon doivent être configurés avec un vrai compte développeur. Les
-identifiants EcoleDirecte ne sont volontairement pas persistés par cette
-version ; il faut choisir un gestionnaire de secrets audité avant d'activer
-une connexion persistante sur un serveur public. Aucun contournement de QCM,
+identifiants EcoleDirecte associés au compte sont chiffrés par Fernet avec une
+clé injectée hors du code ; une déconnexion supprime la liaison et révoque les
+jetons Alexa associés. Aucun contournement de QCM,
 CAPTCHA ou autre protection n'est implémenté.
 
 Les fichiers [`Dockerfile`](./Dockerfile) et
 [`docker-compose.yml`](./docker-compose.yml) préparent un lancement derrière
-un reverse proxy HTTPS. Le serveur fourni reste une démonstration locale :
-ne l'exposez pas directement sur Internet sans ajouter TLS, CSRF, limitation
-de débit, rotation/révocation des sessions et un vrai flux OAuth Account
-Linking.
+un reverse proxy HTTPS maintenu. La validation Alexa et les limites
+documentées doivent être complétées avant toute exposition publique.
 
 Pour exécuter tous les tests avec les données fictives :
 

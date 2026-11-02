@@ -2,20 +2,25 @@
 
 import html
 import json
+import os
 import secrets
+import time
 from datetime import date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 from ecole_directe import EcoleDirecteClient, EcoleDirecteError, redact_response
+from application import read_body, SharedRateLimiter, trusted_client_address
 
 
 
 # Listen on every network interface so other devices can reach the server.
-HOST = "0.0.0.0"
+HOST = "127.0.0.1"
 PORT = 8000
-CHALLENGES: dict[str, EcoleDirecteClient] = {}
-SESSIONS: dict[str, EcoleDirecteClient] = {}
+CHALLENGES: dict[str, tuple[float, EcoleDirecteClient]] = {}
+SESSIONS: dict[str, tuple[float, EcoleDirecteClient]] = {}
+LIMITER = SharedRateLimiter()
+TTL = 600
 SERVICES = {
     "emploi": ("Emploi du temps", "E/{student_id}/emploidutemps.awp?verbe=get&v=1.8.28"),
     "cahier": ("Cahier de texte", "Eleves/{student_id}/cahierdetexte.awp?verbe=get"),
@@ -114,7 +119,8 @@ def render_services(session_id: str) -> str:
         '<section class="services"><p class="services-title">Que voulez-vous consulter ?</p>'
         f'<form method="post" action="/service"><input type="hidden" name="session" '
         f'value="{html.escape(session_id, quote=True)}"><div class="service-grid">{buttons}'
-        '</div></form></section>'
+        f'</div></form><form method="post" action="/logout"><input type="hidden" name="session" '
+        f'value="{html.escape(session_id, quote=True)}"><button type="submit">Déconnexion</button></form></section>'
     )
 
 
@@ -136,16 +142,27 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, render())
 
     def do_POST(self) -> None:
-        if self.path not in ("/login", "/qcm", "/service"):
+        if self.path not in ("/login", "/qcm", "/service", "/logout"):
             self.send_error(404)
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        form = parse_qs(self.rfile.read(length).decode("utf-8"))
+        if not self._same_origin() or not LIMITER.allow((trusted_client_address(self),)):
+            self._send(429, render("Requête refusée.", error=True))
+            return
+        try:
+            form = parse_qs(
+                read_body(self, "application/x-www-form-urlencoded").decode("utf-8", "strict"),
+                strict_parsing=True,
+            )
+        except (ValueError, UnicodeDecodeError):
+            self._send(400, render("Requête invalide.", error=True))
+            return
         try:
             if self.path == "/login":
                 self._login(form)
             elif self.path == "/qcm":
                 self._answer_qcm(form)
+            elif self.path == "/logout":
+                self._logout(form)
             else:
                 self._service(form)
         except EcoleDirecteError as error:
@@ -165,7 +182,8 @@ class Handler(BaseHTTPRequestHandler):
         if result.get("code") in (250, "250"):
             qcm = client.get_qcm()
             challenge_id = secrets.token_urlsafe(24)
-            CHALLENGES[challenge_id] = client
+            self._purge()
+            CHALLENGES[challenge_id] = (time.time() + TTL, client)
             self._send(200, render(qcm=render_qcm(challenge_id, qcm.get("data") or {})))
             return
         self._show_services(client)
@@ -173,24 +191,28 @@ class Handler(BaseHTTPRequestHandler):
     def _answer_qcm(self, form: dict[str, list[str]]) -> None:
         challenge_id = form.get("challenge", [""])[0]
         choice = form.get("choix", [""])[0]
-        client = CHALLENGES.get(challenge_id)
+        self._purge()
+        entry = CHALLENGES.pop(challenge_id, None)
+        client = entry[1] if entry else None
         if not client or not choice:
             raise ValueError("Défi QCM introuvable")
         result = client.complete_qcm(choice)
-        CHALLENGES.pop(challenge_id, None)
         self._show_services(client)
 
     def _show_services(self, client: EcoleDirecteClient) -> None:
         if not client.student_id:
             raise EcoleDirecteError("Impossible de trouver l'identifiant de l'élève.")
         session_id = secrets.token_urlsafe(24)
-        SESSIONS[session_id] = client
+        self._purge()
+        SESSIONS[session_id] = (time.time() + TTL, client)
         self._send(200, render(services=render_services(session_id)))
 
     def _service(self, form: dict[str, list[str]]) -> None:
         session_id = form.get("session", [""])[0]
         service = form.get("service", [""])[0]
-        client = SESSIONS.get(session_id)
+        self._purge()
+        entry = SESSIONS.get(session_id)
+        client = entry[1] if entry else None
         if not client or service not in SERVICES:
             raise ValueError("Session ou service invalide")
         _, endpoint_template = SERVICES[service]
@@ -212,6 +234,11 @@ class Handler(BaseHTTPRequestHandler):
             )
         self._send(200, render(response_text))
 
+    def _logout(self, form: dict[str, list[str]]) -> None:
+        session_id = form.get("session", [""])[0]
+        SESSIONS.pop(session_id, None)
+        self._send(200, render("Session locale fermée."))
+
     def _send(
         self,
         status: int,
@@ -227,13 +254,29 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _same_origin(self) -> bool:
+        origin = self.headers.get("Origin") or self.headers.get("Referer")
+        if not origin:
+            return True
+        parsed = urlparse(origin)
+        return parsed.netloc == self.headers.get("Host", "")
+
+    @staticmethod
+    def _purge() -> None:
+        now = time.time()
+        for mapping in (CHALLENGES, SESSIONS):
+            for key, (expires, _) in list(mapping.items())[:100]:
+                if expires <= now:
+                    mapping.pop(key, None)
+
     def log_message(self, format: str, *args: object) -> None:
         return
 
 
 def main() -> None:
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Site disponible sur http://0.0.0.0:{PORT}")
+    host = os.environ.get("ECO_TO_ALEXA_HOST", HOST)
+    server = ThreadingHTTPServer((host, int(os.environ.get("ECO_TO_ALEXA_WEB_PORT", str(PORT)))), Handler)
+    print(f"Site disponible sur http://{host}:{server.server_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
