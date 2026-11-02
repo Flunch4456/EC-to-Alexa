@@ -9,10 +9,45 @@ from __future__ import annotations
 import html
 import json
 import os
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from application import AccountStore, AlexaSkill, OAuthAccountLinking
+
+MAX_REQUEST_AGE = 150  # secondes, tolérance imposée par Amazon
+
+
+def alexa_access_token(request: dict[str, Any]) -> str:
+    system = request.get("context", {}).get("System", {})
+    token = system.get("user", {}).get("accessToken")
+    if not token:
+        token = request.get("session", {}).get("user", {}).get("accessToken")
+    return str(token or "")
+
+
+def valid_alexa_envelope(
+    request: dict[str, Any], skill_id: str, now: datetime | None = None
+) -> bool:
+    """Vérifie l'identifiant de skill et la fraîcheur de la requête."""
+    if skill_id:
+        application = (
+            request.get("context", {}).get("System", {}).get("application")
+            or request.get("session", {}).get("application")
+            or {}
+        )
+        if application.get("applicationId") != skill_id:
+            return False
+    timestamp = str(request.get("request", {}).get("timestamp", ""))
+    try:
+        sent = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if sent.tzinfo is None:
+        sent = sent.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return abs((now - sent).total_seconds()) <= MAX_REQUEST_AGE
 
 
 class OAuthHandler(BaseHTTPRequestHandler):
@@ -35,16 +70,17 @@ class OAuthHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        fields = self._form()
         try:
-            if parsed.path == "/oauth/authorize":
-                self._authorize(fields)
-            elif parsed.path == "/oauth/token":
-                self._token(fields)
-            elif parsed.path == "/oauth/revoke":
-                self._revoke(fields)
-            elif parsed.path == "/alexa":
+            # Le corps ne peut être lu qu'une fois : /alexa lit du JSON, les
+            # routes OAuth un formulaire.
+            if parsed.path == "/alexa":
                 self._alexa()
+            elif parsed.path == "/oauth/authorize":
+                self._authorize(self._form())
+            elif parsed.path == "/oauth/token":
+                self._token(self._form())
+            elif parsed.path == "/oauth/revoke":
+                self._revoke(self._form())
             else:
                 self._send_json(404, {"error": "not_found"})
         except PermissionError as error:
@@ -79,13 +115,17 @@ class OAuthHandler(BaseHTTPRequestHandler):
         self._send_json(200, {})
 
     def _alexa(self) -> None:
-        authorization = self.headers.get("Authorization", "")
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() != "bearer" or not token:
-            self._send_json(401, {"error": "invalid_token"})
-            return
         request = json.loads(self.rfile.read(self._content_length()))
-        self._send_json(200, self.skill.handle(token, request))
+        if not valid_alexa_envelope(request, os.environ.get("ALEXA_SKILL_ID", "")):
+            self._send_json(403, {"error": "forbidden"})
+            return
+        # Alexa transmet le jeton OAuth dans le corps de la requête, pas dans
+        # un en-tête Authorization.
+        token = alexa_access_token(request)
+        if not token:
+            scheme, _, header_token = self.headers.get("Authorization", "").partition(" ")
+            token = header_token if scheme.lower() == "bearer" else ""
+        self._send_json(200, self.skill.handle(token or None, request))
 
     def _valid_authorize_request(self, params: dict[str, str]) -> bool:
         return (

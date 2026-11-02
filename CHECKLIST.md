@@ -39,8 +39,13 @@ déploiement.
   sans accepter un identifiant élève fourni arbitrairement par le navigateur.
 - [x] Ajouter un tableau de bord authentifié et une déconnexion EcoleDirecte
   avec révocation de la liaison.
-- [ ] Ajouter les intents emploi du temps, prochain cours et évaluations
-  uniquement à partir des réponses API réellement disponibles.
+- [x] Ajouter les intents emploi du temps, prochain cours, notes et
+  évaluations du cahier de texte, avec des réponses vocales détaillées
+  ([`alexa_speech.py`](./alexa_speech.py)).
+- [x] Modèle vocal fr-FR et manifeste dans [`skill-package/`](./skill-package).
+- [x] Webhook `/alexa` : jeton lu dans le corps de la requête, carte
+  LinkAccount, LaunchRequest, vérification `ALEXA_SKILL_ID` et horodatage.
+- [ ] Vérifier la signature des requêtes Amazon avant publication publique.
 - [x] Brancher le healthcheck sur le processus web principal.
 - [x] Ajouter une configuration reverse proxy avec en-têtes de sécurité,
   HTTPS et limites de taille.

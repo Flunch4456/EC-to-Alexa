@@ -21,6 +21,7 @@ par Git. Les variables reconnues par le client actuel sont :
 | `ECO_TO_ALEXA_DB` | Non | Chemin de la base SQLite de la fondation comptes. |
 | `ALEXA_OAUTH_CLIENT_ID` | Pour OAuth | Identifiant client déclaré dans Alexa. |
 | `ALEXA_OAUTH_REDIRECT_URI` | Pour OAuth | URI HTTPS autorisée par Alexa, exactement à l'identique. |
+| `ALEXA_SKILL_ID` | Recommandé | Identifiant `amzn1.ask.skill...` ; les requêtes d'une autre skill sont refusées. |
 
 Générez une clé Fernet une seule fois et stockez-la uniquement dans `.env` ou
 dans le gestionnaire de secrets du serveur :
@@ -84,26 +85,59 @@ le port 8001. La contrainte HTTPS de l'URI de redirection reste volontaire :
 utilisez un tunnel HTTPS de développement ou testez le fournisseur directement
 avec les tests unitaires.
 
-### Ce qui devra être configuré avant un vrai test sur un appareil
+### Créer la skill « Mon Carnet Scolaire »
 
-1. Créer une skill personnalisée en français dans la [console Alexa
-   Developer](https://developer.amazon.com/alexa/console).
-2. Définir les intents du modèle vocal : `GetHomeworkIntent`,
-   `GetAbsencesIntent`, `GetMessagesIntent`, `HelpIntent`, `CancelIntent` et
-   `StopIntent`.
-3. Déployer une API HTTPS publique avec un certificat valide. Alexa n'accepte
-   pas le serveur local `127.0.0.1`.
-4. Déployer `oauth_server.py` derrière HTTPS. Les chemins OAuth sont :
-   `/oauth/authorize`, `/oauth/token` et `/oauth/revoke`.
-5. Déclarer dans Alexa l'URL d'autorisation, l'URL de jeton, le client OAuth,
-   les scopes et l'URL de redirection exactement fournie par Amazon.
-6. Après consentement, émettre un jeton opaque aléatoire dont seule
-   l'empreinte est stockée côté serveur, puis retrouver l'utilisateur par son
-   `user_id` interne.
-7. Configurer l'endpoint HTTPS de la skill et vérifier la signature ou le
-   certificat de la requête selon les exigences Amazon actuelles.
-8. Tester d'abord en mode développement avec un compte fictif et les tests
-   simulés du dépôt.
+Le modèle vocal est prêt dans [`skill-package/`](./skill-package) :
+[`skill.json`](./skill-package/skill.json) (manifeste) et
+[`fr-FR.json`](./skill-package/interactionModels/custom/fr-FR.json)
+(phrases et intents). Phrase d'ouverture : « Alexa, ouvre mon carnet
+scolaire ».
+
+| Ce que l'élève dit | Intent | Réponse |
+| --- | --- | --- |
+| « mon emploi du temps », « j'ai quoi demain », « j'ai cours lundi » | `GetTodayScheduleIntent`, `GetTomorrowScheduleIntent`, `GetScheduleIntent` | Nombre de cours, heures de début et de fin, matière et salle de chaque cours, cours annulés. |
+| « mon prochain cours » | `GetNextClassIntent` | Matière, heure, salle et professeur. |
+| « mes devoirs », « mes devoirs pour jeudi » | `GetHomeworkIntent` | Contenu de chaque devoir par matière (par défaut : prochain jour de cours), devoirs déjà faits, évaluations. |
+| « mes notes » | `GetGradesIntent` | Les trois dernières notes avec matière et intitulé. |
+| « mes absences » | `GetAbsencesIntent` | Absences, retards, nombre non justifié, le plus récent. |
+| « mes messages » | `GetMessagesIntent` | Nouveaux messages avec expéditeur et objet. |
+
+1. Dans la [console Alexa Developer](https://developer.amazon.com/alexa/console/ask),
+   cliquez sur **Create Skill**, nom « Mon Carnet Scolaire », langue
+   **French (FR)**, type **Custom**, hébergement **Provision your own**.
+2. Onglet **Build → Interaction Model → JSON Editor** : collez le contenu de
+   `skill-package/interactionModels/custom/fr-FR.json`, puis **Save** et
+   **Build skill**.
+3. **Build → Endpoint** : choisissez **HTTPS**, URL
+   `https://<votre-domaine>/alexa`, certificat « My development endpoint has a
+   certificate from a trusted certificate authority ». Alexa n'accepte pas
+   `127.0.0.1` : utilisez le domaine du `Caddyfile` ou un tunnel HTTPS
+   (Cloudflare Tunnel, ngrok) vers le port 8001.
+4. Copiez l'**identifiant de la skill** (`amzn1.ask.skill...`) dans
+   `ALEXA_SKILL_ID` : le webhook refuse les requêtes d'une autre skill et
+   celles de plus de 150 secondes.
+5. **Build → Account Linking** : activez-le, type **Auth Code Grant** :
+   - Authorization URI : `https://<votre-domaine>/oauth/authorize`
+   - Access Token URI : `https://<votre-domaine>/oauth/token`
+   - Client ID : la valeur choisie pour `ALEXA_OAUTH_CLIENT_ID`
+   - Client Secret : une valeur quelconque (non vérifiée par cette version)
+   - Authentication Scheme : **Credentials in request body**
+   - Scope : `ecole`
+   Copiez l'une des **Alexa Redirect URLs** affichées en bas de page
+   (`https://pitangui.amazon.com/api/skill/link/...` ou
+   `https://layla.amazon.com/...`) dans `ALEXA_OAUTH_REDIRECT_URI`, puis
+   redémarrez `oauth_server.py`.
+6. Créez votre compte et connectez École Directe sur `account_server.py`,
+   puis dans l'application Alexa : **Skills → Vos skills → Développement →
+   Mon Carnet Scolaire → Activer**, et connectez-vous avec ce compte.
+7. Onglet **Test** de la console (mode Development) : tapez « ouvre mon
+   carnet scolaire » puis « mes devoirs pour demain ».
+
+Alexa envoie le jeton OAuth dans le corps de la requête
+(`context.System.user.accessToken`) : le webhook le lit là, et répond avec
+une carte **LinkAccount** si le compte n'est pas lié. La vérification de
+signature des requêtes Amazon (`Signature-256`) reste à ajouter avant une
+publication publique ; elle n'est pas nécessaire en mode Development.
 
 Le serveur `account_server.py` vérifie la connexion EcoleDirecte avant de
 chiffrer les identifiants. Un compte qui déclenche le QCM doit d'abord

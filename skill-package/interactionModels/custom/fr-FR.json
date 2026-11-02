@@ -1,0 +1,121 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "mon carnet scolaire",
+      "intents": [
+        { "name": "AMAZON.CancelIntent", "samples": [] },
+        { "name": "AMAZON.HelpIntent", "samples": [] },
+        { "name": "AMAZON.StopIntent", "samples": [] },
+        { "name": "AMAZON.NavigateHomeIntent", "samples": [] },
+        { "name": "AMAZON.FallbackIntent", "samples": [] },
+        {
+          "name": "GetTodayScheduleIntent",
+          "slots": [],
+          "samples": [
+            "mon emploi du temps",
+            "mon emploi du temps d'aujourd'hui",
+            "quel est mon emploi du temps aujourd'hui",
+            "j'ai quoi aujourd'hui",
+            "j'ai cours aujourd'hui",
+            "quels cours j'ai aujourd'hui",
+            "c'est quoi mes cours aujourd'hui"
+          ]
+        },
+        {
+          "name": "GetTomorrowScheduleIntent",
+          "slots": [],
+          "samples": [
+            "mon emploi du temps de demain",
+            "quel est mon emploi du temps demain",
+            "j'ai quoi demain",
+            "j'ai cours demain",
+            "quels cours j'ai demain",
+            "à quelle heure je commence demain"
+          ]
+        },
+        {
+          "name": "GetScheduleIntent",
+          "slots": [{ "name": "jour", "type": "AMAZON.DATE" }],
+          "samples": [
+            "mon emploi du temps {jour}",
+            "mon emploi du temps pour {jour}",
+            "quel est mon emploi du temps {jour}",
+            "j'ai quoi {jour}",
+            "j'ai cours {jour}",
+            "quels cours j'ai {jour}"
+          ]
+        },
+        {
+          "name": "GetNextClassIntent",
+          "slots": [],
+          "samples": [
+            "mon prochain cours",
+            "c'est quoi mon prochain cours",
+            "quel est mon prochain cours",
+            "j'ai quoi après",
+            "j'ai quoi maintenant",
+            "c'est quoi le prochain cours",
+            "dans quelle salle est mon prochain cours"
+          ]
+        },
+        {
+          "name": "GetHomeworkIntent",
+          "slots": [{ "name": "jour", "type": "AMAZON.DATE" }],
+          "samples": [
+            "mes devoirs",
+            "quels sont mes devoirs",
+            "j'ai des devoirs",
+            "j'ai quoi comme devoirs",
+            "mes devoirs pour {jour}",
+            "quels sont mes devoirs pour {jour}",
+            "j'ai des devoirs pour {jour}",
+            "j'ai quoi à faire pour {jour}",
+            "qu'est-ce que j'ai à faire pour {jour}",
+            "le cahier de texte",
+            "le cahier de texte pour {jour}"
+          ]
+        },
+        {
+          "name": "GetGradesIntent",
+          "slots": [],
+          "samples": [
+            "mes notes",
+            "mes dernières notes",
+            "quelles sont mes notes",
+            "quelles sont mes dernières notes",
+            "j'ai eu combien",
+            "j'ai eu quoi au dernier contrôle",
+            "ma dernière note"
+          ]
+        },
+        {
+          "name": "GetAbsencesIntent",
+          "slots": [],
+          "samples": [
+            "mes absences",
+            "mes retards",
+            "mes absences et mes retards",
+            "combien j'ai d'absences",
+            "combien j'ai de retards",
+            "est-ce que j'ai des absences",
+            "la vie scolaire"
+          ]
+        },
+        {
+          "name": "GetMessagesIntent",
+          "slots": [],
+          "samples": [
+            "mes messages",
+            "mes nouveaux messages",
+            "est-ce que j'ai des messages",
+            "est-ce que j'ai reçu un message",
+            "j'ai des nouveaux messages",
+            "lis mes messages",
+            "la messagerie"
+          ]
+        }
+      ],
+      "types": []
+    }
+  }
+}

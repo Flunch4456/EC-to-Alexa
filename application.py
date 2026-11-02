@@ -9,13 +9,24 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import html
 import secrets
 import sqlite3
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
+from alexa_speech import (
+    describe_absences,
+    describe_grades,
+    describe_homework,
+    describe_messages,
+    describe_next_class,
+    describe_timetable,
+    next_school_day,
+    school_year,
+)
 from ecole_directe import EcoleDirecteClient, EcoleDirecteError
 
 
@@ -303,89 +314,187 @@ class EcoleDirecteService:
         return f"eleves/{self.client.student_id}/{path}"
 
     def timetable(self, start: date, end: date) -> dict[str, Any]:
+        # Même endpoint que web.py, validé avec un compte réel.
+        if not self.client.student_id:
+            raise EcoleDirecteError("Aucun élève n'est associé à cette session.")
         return self.client.get(
-            self._student_endpoint("emploidutemps.awp?verbe=get"),
+            f"E/{self.client.student_id}/emploidutemps.awp?verbe=get&v=1.8.28",
             dateDebut=start.isoformat(),
             dateFin=end.isoformat(),
         )
 
     def homework(self, day: date) -> dict[str, Any]:
+        # L'endpoint daté renvoie le contenu détaillé de chaque devoir.
         return self.client.get(
-            self._student_endpoint("cahierdetexte.awp?verbe=get"),
-            dateDebut=day.isoformat(),
-            dateFin=day.isoformat(),
+            self._student_endpoint(f"cahierdetexte/{day.isoformat()}.awp?verbe=get")
         )
 
     def absences(self) -> dict[str, Any]:
         return self.client.get(self._student_endpoint("viescolaire.awp?verbe=get"))
 
     def messages(self) -> dict[str, Any]:
-        return self.client.get(self._student_endpoint("messages.awp?verbe=get"))
+        return self.client.get(
+            self._student_endpoint(
+                "messages.awp?force=false&typeRecuperation=received&idClasseur=0"
+                "&orderBy=date&order=desc&query=&onlyRead=&page=0&itemsPerPage=20"
+                "&getAll=0&verbe=get"
+            ),
+            anneeMessages=school_year(date.today()),
+        )
+
+    def grades(self) -> dict[str, Any]:
+        return self.client.get(self._student_endpoint("notes.awp?verbe=get"), anneeScolaire="")
+
+
+def _now() -> datetime:
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo("Europe/Paris")).replace(tzinfo=None)
+    except Exception:  # tzdata absent (Windows) : heure locale de la machine
+        return datetime.now()
 
 
 class AlexaSkill:
     """Maps authenticated Alexa intents to the current user's service only."""
 
-    def __init__(self, store: AccountStore, services: dict[int, EcoleDirecteService]) -> None:
+    HELP = (
+        "Tu peux me demander : quel est mon emploi du temps demain, "
+        "c'est quoi mon prochain cours, quels sont mes devoirs pour lundi, "
+        "mes dernières notes, mes absences ou mes nouveaux messages."
+    )
+    REPROMPT = "Que veux-tu savoir ? Par exemple : mes devoirs pour demain."
+
+    def __init__(
+        self,
+        store: AccountStore,
+        services: dict[int, EcoleDirecteService] | None = None,
+        clock: Any = _now,
+    ) -> None:
         self.store = store
-        self.services = services
+        self.services = services if services is not None else {}
+        self.clock = clock
 
     @classmethod
     def from_store(cls, store: AccountStore) -> "AlexaSkill":
-        services: dict[int, EcoleDirecteService] = {}
-        rows = store.db.execute("SELECT id FROM users").fetchall()
-        for row in rows:
-            client = store.ecole_directe_client(int(row["id"]))
-            if client is not None:
-                services[int(row["id"])] = EcoleDirecteService(client)
-        return cls(store, services)
+        # Les services sont chargés à la demande : un compte lié après le
+        # démarrage du serveur est donc pris en compte sans redémarrage.
+        return cls(store)
 
-    def handle(self, access_token: str, request: dict[str, Any]) -> dict[str, Any]:
-        user_id = self.store.user_for_token(access_token, "alexa_tokens")
+    def _service_for(self, user_id: int) -> EcoleDirecteService | None:
         service = self.services.get(user_id)
-        if service is None:
-            return self._response("Ton compte EcoleDirecte n'est pas connecté.")
-        intent = request.get("request", {}).get("intent", {}).get("name")
-        if intent == "GetAbsencesIntent":
-            result = service.absences()
-            return self._response(self._count_message("absence", result))
-        if intent == "GetMessagesIntent":
-            result = service.messages()
-            return self._response(self._count_message("message", result))
-        if intent == "GetHomeworkIntent":
-            result = service.homework(date.today())
-            return self._response(self._count_message("devoir", result))
-        if intent in {"GetTodayScheduleIntent", "GetNextClassIntent"}:
-            result = service.timetable(date.today(), date.today())
-            return self._response(self._count_message("cours", result))
-        if intent == "GetTomorrowScheduleIntent":
-            tomorrow = date.today() + timedelta(days=1)
-            result = service.timetable(tomorrow, tomorrow)
-            return self._response(self._count_message("cours", result))
-        if intent == "GetUpcomingAssessmentsIntent":
-            return self._response(
-                "Les évaluations annoncées ne sont pas exposées de façon vérifiée "
-                "par le client actuel."
-            )
-        if intent in {"AMAZON.HelpIntent", "HelpIntent"}:
-            return self._response("Tu peux demander tes devoirs, tes absences ou tes messages.")
-        if intent in {"AMAZON.StopIntent", "AMAZON.CancelIntent"}:
+        if service is None and self.store._fernet is not None:
+            client = self.store.ecole_directe_client(user_id)
+            if client is not None:
+                service = self.services[user_id] = EcoleDirecteService(client)
+        return service
+
+    def handle(self, access_token: str | None, request: dict[str, Any]) -> dict[str, Any]:
+        body = request.get("request", {})
+        kind = body.get("type")
+        if kind == "SessionEndedRequest":
+            return {"version": "1.0", "response": {}}
+        intent = body.get("intent", {})
+        name = intent.get("name")
+        if name in {"AMAZON.StopIntent", "AMAZON.CancelIntent"}:
             return self._response("À bientôt.", end_session=True)
-        return self._response("Je ne peux pas répondre à cette demande.")
+        if name in {"AMAZON.HelpIntent", "HelpIntent"}:
+            return self._response(self.HELP, reprompt=self.REPROMPT)
+        if not access_token:
+            return self._link_account()
+        try:
+            user_id = self.store.user_for_token(access_token, "alexa_tokens")
+        except PermissionError:
+            return self._link_account()
+        service = self._service_for(user_id)
+        if service is None:
+            return self._response(
+                "Ton compte École Directe n'est pas connecté. Connecte-le "
+                "depuis le site EC to Alexa, puis redemande-moi."
+            )
+        if kind == "LaunchRequest":
+            return self._response(
+                "Bienvenue sur ton carnet École Directe. " + self.REPROMPT,
+                reprompt=self.REPROMPT,
+            )
+        try:
+            text = self._answer(service, name, intent.get("slots") or {})
+        except EcoleDirecteError:
+            text = (
+                "Je n'arrive pas à joindre École Directe pour le moment. Si une "
+                "question de sécurité t'est demandée, reconnecte ton compte sur le "
+                "site EC to Alexa, puis réessaie."
+            )
+        if text is None:
+            return self._response(
+                "Je n'ai pas compris. " + self.HELP, reprompt=self.REPROMPT
+            )
+        return self._response(text, end_session=True)
+
+    def _answer(
+        self, service: EcoleDirecteService, name: str | None, slots: dict[str, Any]
+    ) -> str | None:
+        now = self.clock()
+        today = now.date()
+        if name == "GetAbsencesIntent":
+            return describe_absences(service.absences())
+        if name == "GetMessagesIntent":
+            return describe_messages(service.messages())
+        if name == "GetGradesIntent":
+            return describe_grades(service.grades())
+        if name == "GetHomeworkIntent":
+            day = self._slot_date(slots, today) or next_school_day(today)
+            return describe_homework(service.homework(day), day, today)
+        if name == "GetNextClassIntent":
+            return describe_next_class(service.timetable(today, today), now)
+        if name in {"GetScheduleIntent", "GetTodayScheduleIntent", "GetTomorrowScheduleIntent"}:
+            default = today + timedelta(days=1) if name == "GetTomorrowScheduleIntent" else today
+            day = self._slot_date(slots, today) or default
+            return describe_timetable(service.timetable(day, day), day, today)
+        return None
 
     @staticmethod
-    def _count_message(kind: str, result: dict[str, Any]) -> str:
-        data = result.get("data")
-        count = len(data) if isinstance(data, list) else 0
-        return f"Il y a {count} {kind}{'s' if count != 1 else ''} dans les données disponibles."
+    def _slot_date(slots: dict[str, Any], today: date) -> date | None:
+        value = str((slots.get("jour") or {}).get("value") or "")
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            pass
+        # AMAZON.DATE peut renvoyer une semaine (2026-W45) : on prend son lundi.
+        if "-W" in value:
+            try:
+                return datetime.strptime(value[:8] + "-1", "%G-W%V-%u").date()
+            except ValueError:
+                return None
+        return None
 
     @staticmethod
-    def _response(text: str, end_session: bool = False) -> dict[str, Any]:
+    def _speech(text: str) -> dict[str, str]:
+        return {"type": "SSML", "ssml": f"<speak>{html.escape(text, quote=False)}</speak>"}
+
+    def _response(
+        self, text: str, end_session: bool = False, reprompt: str | None = None
+    ) -> dict[str, Any]:
+        response: dict[str, Any] = {
+            "outputSpeech": self._speech(text),
+            "card": {"type": "Simple", "title": "École Directe", "content": text},
+            "shouldEndSession": end_session if reprompt is None else False,
+        }
+        if reprompt:
+            response["reprompt"] = {"outputSpeech": self._speech(reprompt)}
+        return {"version": "1.0", "response": response}
+
+    def _link_account(self) -> dict[str, Any]:
+        text = (
+            "Pour utiliser cette skill, lie ton compte EC to Alexa dans "
+            "l'application Alexa. Je t'y ai envoyé une carte."
+        )
         return {
             "version": "1.0",
             "response": {
-                "outputSpeech": {"type": "SSML", "ssml": f"<speak>{text}</speak>"},
-                "shouldEndSession": end_session,
+                "outputSpeech": self._speech(text),
+                "card": {"type": "LinkAccount"},
+                "shouldEndSession": True,
             },
         }
 
