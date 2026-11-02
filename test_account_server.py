@@ -111,7 +111,7 @@ class AccountSiteTests(unittest.TestCase):
         client = self.store.ecole_directe_client(user_id)
         self.assertEqual((client.device_uuid, client.cn, client.cv), ("uuid-fixe", "cn", "cv"))
         status, page = self.post("/simulate", csrf=self.csrf(page), question="today")
-        self.assertIn("Mathematiques en salle A3", page)
+        self.assertIn("Mathématiques en salle A3", page)
 
     def test_state_changing_forms_require_csrf(self):
         self.register()

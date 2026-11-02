@@ -49,12 +49,77 @@ def _spoken_time(value: str) -> str:
     return f"{hours} {unit}" if minutes == 0 else f"{hours} {unit} {minutes:02d}"
 
 
+# Mots des intitulés École Directe (souvent abrégés, sans accents) → forme lue.
+_WORDS = {
+    "MATHEMATIQUES": "mathématiques", "MATHS": "maths", "FRANCAIS": "français",
+    "HISTOIRE": "histoire", "HIST": "histoire", "GEOGRAPHIE": "géographie", "GEO": "géographie",
+    "ECONOMIE": "économie", "ECO": "économie", "GESTION": "gestion", "ECONO": "économiques",
+    "ECONOMIQUES": "économiques", "SOCIALES": "sociales", "PRATIQUE": "pratique",
+    "PROFESSION": "professionnelle", "PROFESSIONNELLE": "professionnelle", "PRO": "professionnelle",
+    "PREVENT": "prévention", "PREVENTION": "prévention", "SANTE": "santé",
+    "ENV": "environnement", "ENVIRONNEMENT": "environnement", "EDUCATION": "éducation",
+    "ED": "éducation", "PHYSIQUE": "physique", "PHYS": "physique", "CHIMIE": "chimie",
+    "CHIM": "chimie", "SPORT": "sportive", "SPORTIVE": "sportive", "SCIENCES": "sciences",
+    "SC": "sciences", "SCIENCE": "science", "NUMERIQUE": "numérique", "NUMERIQUES": "numériques",
+    "TECHNOL": "technologie", "TECHNOLOGIE": "technologie", "INFORM": "informatique",
+    "INFORMATIQUES": "informatiques", "ACCOMPAGNEMT": "accompagnement",
+    "ACCOMPAGNEMENT": "accompagnement", "PERSO": "personnalisé", "PERSONNALISE": "personnalisé",
+    "ENS": "enseignement", "ENSEIGNEMENT": "enseignement", "SCIENTIFIQUE": "scientifique",
+    "MORAL": "moral", "CIVIQUE": "civique", "ARTS": "arts", "APPLIQUES": "appliqués",
+    "PLASTIQUES": "plastiques", "MUSICALE": "musicale", "MUSIQUE": "musique",
+    "ANGLAIS": "anglais", "ESPAGNOL": "espagnol", "ALLEMAND": "allemand", "ITALIEN": "italien",
+    "LATIN": "latin", "PHILOSOPHIE": "philosophie", "CO": "co", "INTERVENTION": "intervention",
+    "CHEF": "chef", "D'OEUVRE": "d'œuvre", "VIE": "vie", "DE": "de", "CLASSE": "classe",
+    "ET": "et", "&": "et", "LA": "la", "LE": "le", "DES": "des", "TERRE": "Terre",
+}
+# Intitulés complets reconnus (clé : lettres seules, en majuscules).
+_PHRASES = {
+    "SCIENCESVIETERRE": "Sciences de la vie et de la Terre",
+    "SCIENCESVIEETTERRE": "Sciences de la vie et de la Terre",
+    "SCIENCESDELAVIEETDELATERRE": "Sciences de la vie et de la Terre",
+}
+# Mentions qui n'apportent rien à l'oral.
+_SKIP = {"LV1", "LV2", "LV3", "LVA", "LVB"}
+
+
 def _subject(value: Any) -> str:
-    name = str(value or "").strip()
-    if not name:
+    """Intitulé de matière lisible à voix haute (« PREVENT.-SANTE-ENV. » → « Prévention santé environnement »)."""
+    raw = str(value or "").strip()
+    if not raw:
         return "matière inconnue"
-    # Les sigles courts (EPS, SVT) restent en majuscules pour être épelés.
-    return name.capitalize() if len(name) > 4 else name
+    letters = re.sub(r"[^A-Z]", "", raw.upper())
+    if letters in _PHRASES:
+        return _PHRASES[letters]
+    words = []
+    for token in re.split(r"[\s./_-]+", raw.replace("&", " & ")):
+        if not token or token.upper() in _SKIP:
+            continue
+        key = token.upper()
+        if key in _WORDS:
+            words.append(_WORDS[key])
+        elif len(token) <= 4 and token.isupper():
+            words.append(token)  # sigle (EPS, SVT, EMC, CIEL) : épelé par Alexa
+        else:
+            words.append(token.lower())
+    text = " ".join(words) or raw
+    return text[:1].upper() + text[1:]
+
+
+def _of(name: str) -> str:
+    """« de » avec élision : « de Français », « d'Anglais », « d'Économie gestion »."""
+    return f"d'{name}" if name[:1].lower() in "aeiouyéèêh" else f"de {name}"
+
+
+def _place(value: Any) -> str:
+    """« C305 BAC PRO CIEL » → « en salle C305 » ; « GYMNASE » → « au gymnase »."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    first = raw.split()[0]
+    if any(char.isdigit() for char in first):
+        return f"en salle {first}"
+    name = raw.lower() if len(raw) > 4 else raw
+    return f"au {name}" if name[:1].lower() not in "aeiouyéèh" else f"à l'{name}"
 
 
 def _plural(count: int, singular: str, plural: str | None = None) -> str:
@@ -114,7 +179,7 @@ def describe_timetable(result: dict[str, Any], day: date, today: date) -> str:
         for course in active:
             part = f"à {_spoken_time(str(course.get('start_date', '')))}, {_subject(course.get('matiere'))}"
             if course.get("salle"):
-                part += f" en salle {course['salle']}"
+                part += " " + _place(course["salle"])
             details.append(part)
         message = (
             f"{label.capitalize()}, tu as {_plural(len(active), 'cours', 'cours')}, "
@@ -122,7 +187,7 @@ def describe_timetable(result: dict[str, Any], day: date, today: date) -> str:
         )
     for course in cancelled:
         message += (
-            f" Attention, le cours de {_subject(course.get('matiere'))} de "
+            f" Attention, le cours {_of(_subject(course.get('matiere')))} de "
             f"{_spoken_time(str(course.get('start_date', '')))} est annulé."
         )
     return message
@@ -140,7 +205,7 @@ def describe_next_class(result: dict[str, Any], now: datetime) -> str:
         if starts_at > now:
             message = f"Ton prochain cours est {_subject(course.get('matiere'))}, à {_spoken_time(start)}"
             if course.get("salle"):
-                message += f", en salle {course['salle']}"
+                message += ", " + _place(course["salle"])
             if course.get("prof"):
                 message += f", avec {course['prof']}"
             return message + "."

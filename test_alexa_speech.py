@@ -52,9 +52,10 @@ class SpeechTests(unittest.TestCase):
     def test_timetable_is_sorted_and_mentions_rooms_and_cancellations(self):
         text = describe_timetable(TIMETABLE, TODAY, TODAY)
         self.assertTrue(text.startswith("Aujourd'hui, tu as 3 cours, de 8 heures à 16 heures."))
-        self.assertLess(text.index("Mathematiques"), text.index("Histoire"))
-        self.assertIn("EPS en salle GYMNASE", text)
-        self.assertIn("le cours de Anglais de 16 heures est annulé", text)
+        self.assertLess(text.index("Mathématiques"), text.index("Histoire"))
+        self.assertIn("EPS au gymnase", text)
+        self.assertIn("le cours d'Anglais de 16 heures est annulé", text)
+        self.assertIn("le cours d'Anglais de 16 heures est annulé", text)
 
     def test_empty_timetable(self):
         self.assertEqual(
@@ -66,7 +67,7 @@ class SpeechTests(unittest.TestCase):
         text = describe_next_class(TIMETABLE, datetime(2026, 11, 2, 9, 30))
         self.assertEqual(
             text,
-            "Ton prochain cours est Histoire-geographie, à 10 heures, en salle B12, avec M. MARTIN.",
+            "Ton prochain cours est Histoire géographie, à 10 heures, en salle B12, avec M. MARTIN.",
         )
         self.assertEqual(
             describe_next_class(TIMETABLE, datetime(2026, 11, 2, 18, 0)),
@@ -82,7 +83,7 @@ class SpeechTests(unittest.TestCase):
         ]}}
         text = describe_homework(result, date(2026, 11, 3), TODAY)
         self.assertIn("Pour demain, tu as 2 devoirs, dont 1 déjà fait.", text)
-        self.assertIn("En Francais : Lire le chapitre 3.", text)
+        self.assertIn("En Français : Lire le chapitre 3.", text)
         self.assertIn("En SVT : Réviser la cellule, c'est déjà fait.", text)
         self.assertIn("il y a une évaluation en SVT", text)
 
@@ -132,7 +133,7 @@ class SpeechTests(unittest.TestCase):
         self.assertEqual(
             describe_grades(result),
             "Tes 2 dernières notes : abs en Anglais ; "
-            "15,5 sur 20 en Mathematiques, pour Contrôle chapitre 2.",
+            "15,5 sur 20 en Mathématiques, pour Contrôle chapitre 2.",
         )
 
     def test_calendar_helpers(self):
@@ -194,7 +195,7 @@ class AlexaSkillFlowTests(unittest.TestCase):
 
     def test_next_class_answer_is_spoken_and_escaped(self):
         response = self.skill.handle(self.token, self.intent("GetNextClassIntent"))
-        self.assertIn("Ton prochain cours est Histoire-geographie", self.speech(response))
+        self.assertIn("Ton prochain cours est Histoire géographie", self.speech(response))
         self.assertTrue(response["response"]["shouldEndSession"])
 
     def test_stop_and_session_end(self):
@@ -327,6 +328,29 @@ class AssessmentTests(unittest.TestCase):
         }}
         text = describe_assessments(result, TODAY)
         self.assertTrue(text.startswith("Tu as 2 évaluations"))
-        self.assertLess(text.index("Histoire"), text.index("Mathematiques"))
+        self.assertLess(text.index("Histoire"), text.index("Mathématiques"))
         self.assertNotIn("Svt", text)
         self.assertIn("Aucune évaluation", describe_assessments({"data": {}}, TODAY))
+
+
+class RealLabelTests(unittest.TestCase):
+    """Intitulés et salles tels que renvoyés par un vrai compte École Directe (bac pro)."""
+
+    def test_abbreviated_subjects_and_rooms_are_speakable(self):
+        result = {"data": [
+            {"start_date": "2026-11-03 08:10", "end_date": "2026-11-03 10:10",
+             "matiere": "Pratique.profession.", "salle": "C305 BAC PRO CIEL"},
+            {"start_date": "2026-11-03 10:20", "end_date": "2026-11-03 12:20",
+             "matiere": "Francais", "salle": "B309 38pl"},
+            {"start_date": "2026-11-03 14:00", "end_date": "2026-11-03 15:00",
+             "matiere": "Economie-gestion", "salle": "B309 38pl", "isAnnule": True},
+            {"start_date": "2026-11-03 15:40", "end_date": "2026-11-03 17:00",
+             "matiere": "Prevent.-sante-env.", "salle": "B309 38pl"},
+        ]}
+        text = describe_timetable(result, date(2026, 11, 3), TODAY)
+        self.assertIn("À 8 heures 10, Pratique professionnelle en salle C305", text)
+        self.assertIn("Français en salle B309", text)
+        self.assertIn("Prévention santé environnement en salle B309", text)
+        self.assertIn("le cours d'Économie gestion de 14 heures est annulé", text)
+        self.assertNotIn("38pl", text)
+        self.assertNotIn("BAC PRO", text)
