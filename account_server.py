@@ -489,16 +489,25 @@ class AccountHandler(BaseHTTPRequestHandler):
   <p class="say">Alexa, demande à {ui.INVOCATION} mon prochain cours</p>
   <form method="post" action="/alexa/unlink">{hidden}
     <button class="quiet" type="submit">Révoquer l'accès d'Alexa</button></form></li>"""
-        else:
-            link_button = ""
-            if self.linker is not None and info:
-                link_button = f"""
-  <p><a class="button" href="/amazon/link?csrf={csrf}">Lier mon compte Amazon</a></p>
-  <p>Tu te connectes à ton compte Amazon (celui de ton Echo), et la skill est activée et
-  reliée à ce compte EC to Alexa, sans passer par l'application.</p>
-  <p class="aside">Autre possibilité :</p>"""
+        elif self.linker is not None and info:
+            # La liaison se fait sur ce site : c'est ici que l'on choisit quel
+            # compte Amazon lit quel École Directe.
             step_alexa = f"""
-<li><h2>Alexa <span class="status">à lier</span></h2>{link_button}
+<li><h2>Alexa <span class="status">à lier</span></h2>
+  <p>Relie ton compte Amazon (celui de ton Echo) à ce compte EC to Alexa. Tu te
+  connectes sur la page officielle d'Amazon, puis la skill « Mon Carnet Scolaire »
+  est activée et liée automatiquement.</p>
+  <p><a class="button" href="/amazon/link?csrf={csrf}">Lier mon compte Amazon</a></p>
+  <p class="aside">Le compte Amazon lié est ensuite affiché ici. Pour le changer,
+  révoque l'accès puis lie un autre compte.</p></li>"""
+        elif self.linker is not None:
+            step_alexa = """
+<li><h2>Alexa <span class="status">en attente</span></h2>
+  <p>Connecte d'abord École Directe (étape 2) : le bouton « Lier mon compte Amazon »
+  apparaîtra ici.</p></li>"""
+        else:
+            step_alexa = f"""
+<li><h2>Alexa <span class="status">à lier</span></h2>
   <p>Dans l'application Alexa, ouvre <strong>Plus › Skills et jeux</strong>, cherche
   la skill « Mon Carnet Scolaire » (onglet <em>Vos skills › Développeur</em> tant qu'elle
   n'est pas publiée), puis touche <strong>Activer</strong>. Alexa t'enverra sur une page

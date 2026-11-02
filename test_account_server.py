@@ -254,3 +254,19 @@ class AmazonLinkFlowTests(AccountSiteTests):
         link = self.store.amazon_link(user_id)
         self.assertEqual((link["alexa_user_id"], link["source"]), ("amzn1.ask.account.APPLINK", "alexa_app"))
         self.assertIsNotNone(link["last_seen_at"])
+
+
+class WebOnlyLinkingTests(AmazonLinkFlowTests):
+    def test_dashboard_offers_only_the_website_link(self):
+        page = self.connected_page()
+        self.assertIn("Lier mon compte Amazon", page)
+        self.assertNotIn("Skills et jeux", page)
+
+    def test_unlinked_voice_request_points_to_the_website(self):
+        from unittest.mock import patch as env_patch
+        with env_patch.dict(os.environ, {"DOMAIN": "ec-to-alexa.example", "ECO_TO_ALEXA_PUBLIC_URL": ""}):
+            response = account_server.AccountHandler.skill.handle(None, {"request": {"type": "LaunchRequest"}})
+        card = response["response"]["card"]
+        self.assertEqual(card["type"], "Simple")
+        self.assertIn("https://ec-to-alexa.example", card["content"])
+        self.assertIn("site EC to Alexa", response["response"]["outputSpeech"]["ssml"])

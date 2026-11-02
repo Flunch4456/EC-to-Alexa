@@ -789,15 +789,35 @@ class AlexaSkill:
         return {"version": "1.0", "response": response}
 
     def _link_account(self) -> dict[str, Any]:
-        text = (
-            "Pour utiliser cette skill, lie ton compte EC to Alexa dans "
-            "l'application Alexa. Je t'y ai envoyé une carte."
-        )
+        # La liaison se fait sur le site (bouton « Lier mon compte Amazon ») ;
+        # sans adresse publique connue, on retombe sur la carte LinkAccount.
+        site = os.environ.get("ECO_TO_ALEXA_PUBLIC_URL", "").strip().rstrip("/")
+        if not site and os.environ.get("DOMAIN", "").strip():
+            site = "https://" + os.environ["DOMAIN"].strip()
+        if not site:
+            text = (
+                "Pour utiliser cette skill, lie ton compte EC to Alexa dans "
+                "l'application Alexa. Je t'y ai envoyé une carte."
+            )
+            card: dict[str, Any] = {"type": "LinkAccount"}
+        else:
+            text = (
+                "Pour utiliser Mon Carnet Scolaire, relie d'abord ton compte sur le "
+                "site EC to Alexa. Je t'ai envoyé son adresse dans l'application Alexa."
+            )
+            card = {
+                "type": "Simple",
+                "title": "Relier ton compte",
+                "content": (
+                    f"Ouvre {site}, connecte-toi, puis touche « Lier mon compte Amazon » "
+                    "à l'étape 3 du tableau de bord."
+                ),
+            }
         return {
             "version": "1.0",
             "response": {
                 "outputSpeech": self._speech(text),
-                "card": {"type": "LinkAccount"},
+                "card": card,
                 "shouldEndSession": True,
             },
         }
