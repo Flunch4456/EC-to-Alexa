@@ -241,4 +241,5 @@ tous les Echo du compte Amazon. Pour l'ouvrir à d'autres comptes :
 | `{"error": "invalid_request"}` sur `/oauth/authorize` | Normal quand on ouvre l'adresse à la main : seule Amazon l'appelle avec les bons paramètres. |
 | `{"error": "alexa_not_configured"}` | `ALEXA_SKILL_ID` vide : section 7. |
 | Alexa ne comprend pas une phrase | Le modèle n'a pas été reconstruit (**Build skill**), ou la phrase n'est pas dans le modèle : l'ajouter (section 10). |
-| « Je n'arrive pas à joindre École Directe » | Mot de passe École Directe changé ou nouvelle question de sécurité : reconnecter École Directe sur le site. |
+| « École Directe pose une question de sécurité que je ne connais pas encore » | Sur le site, bouton « Répondre à la question de sécurité » : la réponse est mémorisée (hachée) et Alexa y répondra seule les fois suivantes. |
+| « Je n'arrive pas à joindre École Directe » | École Directe indisponible ou trop lente, ou mot de passe changé : déconnecter puis reconnecter École Directe sur le site. |
